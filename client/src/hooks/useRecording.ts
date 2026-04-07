@@ -25,6 +25,7 @@ interface SlotRecordingState {
   fileCount: number;
   chunks: Blob[];
   startTime: number;
+  lastFilePath: string | null;
 }
 
 export interface RecordingStatus {
@@ -33,6 +34,7 @@ export interface RecordingStatus {
   totalSize: number;
   startTime: number;
   slotName: string;
+  lastFilePath: string | null;
 }
 
 export function useRecording() {
@@ -70,6 +72,7 @@ export function useRecording() {
       });
       state.totalSize += result.size;
       state.fileCount += 1;
+      state.lastFilePath = result.path;
       state.chunkIndex += 1;
       state.chunks = [];
       state.accumulatedSize = 0;
@@ -89,6 +92,7 @@ export function useRecording() {
         totalSize: state.totalSize,
         startTime: state.startTime,
         slotName: state.slotName,
+        lastFilePath: state.lastFilePath,
       });
       return next;
     });
@@ -164,6 +168,7 @@ export function useRecording() {
         fileCount: 0,
         chunks: [],
         startTime: Date.now(),
+        lastFilePath: null,
       };
 
       recordingsRef.current.set(slotId, state);
@@ -216,6 +221,32 @@ export function useRecording() {
     setIsRecording(false);
   }, [stopRecording]);
 
+  /** Force-flush current chunks to disk and return file paths per slot.
+   *  Stops the recorders (they'll be restarted on VAR exit). */
+  const flushAndGetPaths = useCallback(async (): Promise<Map<SlotId, string>> => {
+    const paths = new Map<SlotId, string>();
+    const entries = Array.from(recordingsRef.current.entries());
+
+    for (const [slotId, state] of entries) {
+      // Remove from map so onstop doesn't restart
+      recordingsRef.current.delete(slotId);
+      if (state.recorder.state !== 'inactive') {
+        // Stop triggers onstop which saves chunks
+        state.recorder.stop();
+      }
+      // Wait a bit for the save to complete
+      await new Promise((r) => setTimeout(r, 200));
+      if (state.lastFilePath) {
+        paths.set(slotId as SlotId, state.lastFilePath);
+      }
+
+      setStatuses((prev) => { const next = new Map(prev); next.delete(slotId); return next; });
+    }
+
+    setIsRecording(false);
+    return paths;
+  }, []);
+
   return {
     isElectron,
     isRecording,
@@ -225,5 +256,6 @@ export function useRecording() {
     startRecording,
     stopRecording,
     stopAll,
+    flushAndGetPaths,
   };
 }

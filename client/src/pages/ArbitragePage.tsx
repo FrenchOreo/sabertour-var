@@ -116,35 +116,63 @@ export default function ArbitragePage() {
   }, [slots]);
 
   // ============ VAR trigger ============
-  const handleVarPress = useCallback(() => {
-    let hasAnyData = false;
-    const blobs = new Map<SlotId, string>();
+  const handleVarPress = useCallback(async () => {
+    // Stop buffer recording
+    for (const slot of slots) stopBufferRecording(slot.slotId);
+
+    // Save recording state
+    wasRecordingBeforeVar.current = recording.isRecording;
+    recordingFolderBeforeVar.current = recording.recordingFolder;
+
+    // Try to use disk files first (proper seeking + play)
+    const urls = new Map<SlotId, string>();
     let maxDurationMs = 0;
 
-    for (const slot of slots) {
-      const buffer = getBuffer(slot.slotId);
-      if (buffer && buffer.hasData()) {
-        hasAnyData = true;
-        const blob = buffer.getFullReplayBlob();
-        if (blob) blobs.set(slot.slotId, URL.createObjectURL(blob));
-        const dur = buffer.getReplayDurationMs();
-        if (dur > maxDurationMs) maxDurationMs = dur;
+    if (recording.isRecording && recording.isElectron) {
+      // Flush current recording to disk and get file paths
+      const filePaths = await recording.flushAndGetPaths();
+      for (const [slotId, filePath] of filePaths) {
+        urls.set(slotId, `file://${filePath}`);
+      }
+    } else if (recording.isRecording) {
+      recording.stopAll();
+    }
+
+    // If no files from recording, fall back to memory blobs
+    if (urls.size === 0) {
+      for (const slot of slots) {
+        const buffer = getBuffer(slot.slotId);
+        if (buffer && buffer.hasData()) {
+          const blob = buffer.getFullReplayBlob();
+          if (blob) urls.set(slot.slotId, URL.createObjectURL(blob));
+          const dur = buffer.getReplayDurationMs();
+          if (dur > maxDurationMs) maxDurationMs = dur;
+        }
+      }
+    } else {
+      // For file-based replay, estimate duration from buffer timestamps
+      for (const slot of slots) {
+        const buffer = getBuffer(slot.slotId);
+        if (buffer) {
+          const dur = buffer.getReplayDurationMs();
+          if (dur > maxDurationMs) maxDurationMs = dur;
+        }
       }
     }
 
-    if (!hasAnyData) {
+    if (urls.size === 0) {
       setVarError('Buffer vide — attendre 30s après connexion des caméras');
       setTimeout(() => setVarError(null), 4000);
+      // Restart buffer recording since we stopped it
+      for (const slot of slots) {
+        const stream = streams.get(slot.slotId);
+        if (stream && slot.cameraConnected) startBufferRecording(slot.slotId, stream);
+      }
       return;
     }
 
-    for (const slot of slots) stopBufferRecording(slot.slotId);
-    wasRecordingBeforeVar.current = recording.isRecording;
-    recordingFolderBeforeVar.current = recording.recordingFolder;
-    if (recording.isRecording) recording.stopAll();
-
     setVarDurationMs(maxDurationMs);
-    setVarBlobs(blobs);
+    setVarBlobs(urls);
     setVarMode(true);
     setExpandedSlot(null);
     setVideoZoom(1);
@@ -153,14 +181,16 @@ export default function ArbitragePage() {
     setCurrentTimeDisplay(maxDurationMs / 1000);
     setCurrentFrame(Math.round((maxDurationMs / 1000) * FPS_DEFAULT));
     setTotalFrames(Math.round((maxDurationMs / 1000) * FPS_DEFAULT));
-  }, [slots, getBuffer, stopBufferRecording, recording]);
+  }, [slots, getBuffer, stopBufferRecording, recording, streams, startBufferRecording]);
 
   const exitVarMode = useCallback(() => {
     setVarMode(false);
     setIsPlaying(false);
     setExpandedSlot(null);
     setVideoZoom(1);
-    for (const url of varBlobs.values()) URL.revokeObjectURL(url);
+    for (const url of varBlobs.values()) {
+      if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+    }
     setVarBlobs(new Map());
     varVideoRefs.current.clear();
     clearInterval(frameUpdateRef.current);
@@ -236,19 +266,35 @@ export default function ArbitragePage() {
   }, []);
 
   // Update frame counter — during play, read from video; during pause, varTimeRef is truth
+  // Also detect real duration from file-based videos (finite duration)
   useEffect(() => {
     if (!varMode) return;
     frameUpdateRef.current = setInterval(() => {
-      if (isPlaying) {
-        const video = getActiveVideo();
-        if (!video) return;
+      const video = getActiveVideo();
+      if (!video) return;
+
+      // If video has a real duration (file-based), use it for more accuracy
+      if (isFinite(video.duration) && video.duration > 0) {
+        const realDur = video.duration;
+        const realTotalFrames = Math.round(realDur * fps);
+        if (isPlaying) {
+          const time = video.currentTime;
+          varTimeRef.current = time;
+          setCurrentFrame(Math.round(time * fps));
+          setTotalFrames(realTotalFrames);
+          setCurrentTimeDisplay(time);
+          // Update known duration if file gives us a better one
+          if (Math.abs(realDur - varDurationSec) > 1) {
+            setVarDurationMs(realDur * 1000);
+          }
+        }
+      } else if (isPlaying) {
         const time = Math.min(video.currentTime, varDurationSec);
         varTimeRef.current = time;
         setCurrentFrame(Math.min(Math.round(time * fps), varTotalFrames));
         setTotalFrames(varTotalFrames);
         setCurrentTimeDisplay(time);
       }
-      // When paused, display is already set by seekTo/stepForward/stepBackward
     }, 50);
     return () => clearInterval(frameUpdateRef.current);
   }, [varMode, isPlaying, getActiveVideo, varDurationSec, varTotalFrames, fps]);
