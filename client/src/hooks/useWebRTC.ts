@@ -33,7 +33,7 @@ export function useWebRTCCamera({ slotId, stream, send }: UseWebRTCCameraOptions
             if (!params.encodings || params.encodings.length === 0) {
               params.encodings = [{}];
             }
-            params.encodings[0].maxBitrate = 4_000_000; // 4 Mbps
+            params.encodings[0].maxBitrate = 8_000_000; // 8 Mbps
             params.degradationPreference = 'maintain-resolution';
             sender.setParameters(params);
           } catch (e) {

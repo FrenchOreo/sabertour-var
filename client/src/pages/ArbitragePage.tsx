@@ -462,8 +462,8 @@ export default function ArbitragePage() {
 
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* Hidden ref video for VAR grid */}
-      {isVarGrid && (
+      {/* Hidden ref video for VAR mode (always mounted in VAR to keep player state) */}
+      {varMode && !isVarExpanded && (
         <video ref={varVideoRef} style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} playsInline muted />
       )}
 

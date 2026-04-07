@@ -19,8 +19,8 @@ ipcMain.handle('select-recording-folder', async () => {
   return lastRecordingFolder;
 });
 
-ipcMain.handle('save-recording-chunk', async (_event, { folder, slotName, chunkIndex, data }) => {
-  const fileName = `${slotName}_${chunkIndex}.webm`;
+ipcMain.handle('save-recording-chunk', async (_event, { folder, slotName, chunkIndex, data, fileName: customFileName }) => {
+  const fileName = customFileName || `${slotName}_${chunkIndex}.webm`;
   const filePath = path.join(folder, fileName);
   const buffer = Buffer.from(data);
   await fs.promises.writeFile(filePath, buffer);

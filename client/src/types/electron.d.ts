@@ -5,6 +5,7 @@ export interface ElectronAPI {
     slotName: string;
     chunkIndex: number;
     data: Uint8Array;
+    fileName?: string;
   }) => Promise<{ path: string; size: number }>;
   getRecordingFolder: () => Promise<string | null>;
 }

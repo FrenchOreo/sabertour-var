@@ -4,10 +4,21 @@ import { getBitrate, getRecordingMimeType, getRecordingExtension } from '../lib/
 
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
 
+function formatTimestamp(date: Date): string {
+  const y = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+  const s = String(date.getSeconds()).padStart(2, '0');
+  return `${y}-${mo}-${d}_${h}-${mi}-${s}`;
+}
+
 interface SlotRecordingState {
   recorder: MediaRecorder;
   stream: MediaStream;
   slotName: string;
+  sessionTimestamp: string; // e.g. "2026-04-07_14-30-05"
   chunkIndex: number;
   accumulatedSize: number;
   totalSize: number;
@@ -45,12 +56,17 @@ export function useRecording() {
     const arrayBuffer = await blob.arrayBuffer();
     const data = new Uint8Array(arrayBuffer);
 
+    const ext = getRecordingExtension();
+    const partSuffix = state.chunkIndex > 0 ? `_part${state.chunkIndex + 1}` : '';
+    const fileName = `${state.slotName}_${state.sessionTimestamp}${partSuffix}.${ext}`;
+
     try {
       const result = await window.electronAPI!.saveRecordingChunk({
         folder,
         slotName: state.slotName,
         chunkIndex: state.chunkIndex,
         data,
+        fileName,
       });
       state.totalSize += result.size;
       state.fileCount += 1;
@@ -141,6 +157,7 @@ export function useRecording() {
         recorder: null as unknown as MediaRecorder,
         stream,
         slotName,
+        sessionTimestamp: formatTimestamp(new Date()),
         chunkIndex: 0,
         accumulatedSize: 0,
         totalSize: 0,
