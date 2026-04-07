@@ -59,21 +59,26 @@ export default function SetupPage() {
       });
   }, []);
 
-  // Check if already configured
+  // Poll slots for real-time camera status
   useEffect(() => {
-    fetch('/api/slots')
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.slots && data.slots.length > 0) {
-          setSlots(data.slots);
-          const names: Record<number, string> = {};
-          data.slots.forEach((s: SlotState) => {
-            names[s.slotId] = s.name;
-          });
-          setSlotNames(names);
-        }
-      })
-      .catch(() => {});
+    const fetchSlots = () => {
+      fetch('/api/slots')
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.slots && data.slots.length > 0) {
+            setSlots(data.slots);
+            const names: Record<number, string> = {};
+            data.slots.forEach((s: SlotState) => {
+              names[s.slotId] = s.name;
+            });
+            setSlotNames(names);
+          }
+        })
+        .catch(() => {});
+    };
+    fetchSlots();
+    const interval = setInterval(fetchSlots, 2000);
+    return () => clearInterval(interval);
   }, []);
 
   // Compute base URL from LAN IP or fallback to window.location

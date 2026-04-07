@@ -2,12 +2,14 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCCamera } from '../hooks/useWebRTC';
 import { SlotId, WsMessage } from 'shared/types';
+import { getResolutionConstraints } from '../lib/qualitySettings';
 
 type CameraStatus = 'init' | 'permission' | 'connecting' | 'live' | 'reconnecting' | 'error';
 
 async function getCameraStream(): Promise<MediaStream> {
+  const res = getResolutionConstraints();
   const constraints = [
-    { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+    { video: { facingMode: 'environment', ...res }, audio: false },
     { video: { facingMode: 'environment' }, audio: false },
     { video: true, audio: false },
   ];

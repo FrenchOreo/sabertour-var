@@ -307,6 +307,12 @@ export default function ArbitragePage() {
         <span className="text-muted" style={{ fontSize: '0.85rem', flex: 1 }}>
           {connected ? '● Connecté' : '○ Déconnecté'}
         </span>
+        <a href="/setup" className="btn" style={{ textDecoration: 'none', fontSize: '0.75rem', padding: '6px 12px' }}>
+          Setup
+        </a>
+        <a href="/settings" className="btn" style={{ textDecoration: 'none', fontSize: '0.75rem', padding: '6px 12px' }}>
+          Paramètres
+        </a>
         {varMode && selectedSlotInfo && (
           <span style={{ fontFamily: 'var(--font-ui)', fontWeight: 600, color: 'var(--text)', textTransform: 'uppercase' }}>
             CAMÉRA: {selectedSlotInfo.name}

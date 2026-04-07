@@ -1,5 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { SlotState } from 'shared/types';
+import {
+  getResolution, setResolution, RESOLUTION_OPTIONS,
+  getBitrateLevel, setBitrateLevel, BITRATE_OPTIONS,
+  Resolution, BitrateLevel,
+} from '../lib/qualitySettings';
 
 const STORAGE_KEY = 'saber-var-selected-ip';
 
@@ -12,6 +17,9 @@ export default function SettingsPage() {
   const [testResult, setTestResult] = useState<'idle' | 'loading' | 'success' | 'fail'>('idle');
   const [slots, setSlots] = useState<SlotState[]>([]);
   const [saved, setSaved] = useState(false);
+  const [resolution, setResolutionState] = useState<Resolution>(getResolution);
+  const [bitrateLevel, setBitrateLevelState] = useState<BitrateLevel>(getBitrateLevel);
+  const [qualitySaved, setQualitySaved] = useState(false);
 
   // Fetch network info on mount
   useEffect(() => {
@@ -329,6 +337,88 @@ export default function SettingsPage() {
               </a>
             </div>
           )}
+        </div>
+
+        {/* Section: Qualité Vidéo */}
+        <div className="card" style={{ marginTop: 24 }}>
+          <h2
+            style={{
+              fontSize: '1.2rem',
+              marginBottom: 16,
+              textTransform: 'uppercase',
+              letterSpacing: '0.1em',
+            }}
+          >
+            Qualité Vidéo
+          </h2>
+
+          <div style={{ marginBottom: 16 }}>
+            <label
+              className="text-muted"
+              style={{
+                display: 'block',
+                fontSize: '0.85rem',
+                marginBottom: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              Résolution caméra :
+            </label>
+            <select
+              className="input"
+              value={resolution}
+              onChange={(e) => setResolutionState(e.target.value as Resolution)}
+              style={{ maxWidth: 300 }}
+            >
+              {RESOLUTION_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label
+              className="text-muted"
+              style={{
+                display: 'block',
+                fontSize: '0.85rem',
+                marginBottom: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              Débit vidéo (bitrate) :
+            </label>
+            <select
+              className="input"
+              value={bitrateLevel}
+              onChange={(e) => setBitrateLevelState(e.target.value as BitrateLevel)}
+              style={{ maxWidth: 300 }}
+            >
+              {BITRATE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <button
+              className="btn"
+              onClick={() => {
+                setResolution(resolution);
+                setBitrateLevel(bitrateLevel);
+                setQualitySaved(true);
+                setTimeout(() => setQualitySaved(false), 2000);
+              }}
+            >
+              {qualitySaved ? 'Sauvegardé !' : 'Sauvegarder'}
+            </button>
+          </div>
+
+          <p className="text-muted" style={{ fontSize: '0.8rem', marginTop: 12 }}>
+            Les changements nécessitent de recharger la page caméra sur les téléphones.
+          </p>
         </div>
       </div>
     </div>

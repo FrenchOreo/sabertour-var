@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import type { SlotId } from 'shared/types';
+import { getBitrate } from '../lib/qualitySettings';
 
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
 
@@ -94,7 +95,7 @@ export function useRecording() {
 
       const recorder = new MediaRecorder(state.stream, {
         mimeType,
-        videoBitsPerSecond: 2_500_000,
+        videoBitsPerSecond: getBitrate(),
       });
 
       recorder.ondataavailable = async (e) => {
