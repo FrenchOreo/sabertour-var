@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCArbitre } from '../hooks/useWebRTC';
 import { useVideoBuffer } from '../hooks/useVideoBuffer';
-import { useFramePlayer, FramePlayer } from '../hooks/useFramePlayer';
+import { useFramePlayer } from '../hooks/useFramePlayer';
 import { useRecording } from '../hooks/useRecording';
 import CameraTile from '../components/CameraTile';
 import VarTimeline from '../components/VarTimeline';
@@ -15,35 +15,22 @@ export default function ArbitragePage() {
   const [expandedSlot, setExpandedSlot] = useState<SlotId | null>(null);
   const [varMode, setVarMode] = useState(false);
   const [varBlobs, setVarBlobs] = useState<Map<SlotId, string>>(new Map());
+  const [varDurationMs, setVarDurationMs] = useState(0); // known duration from chunk timestamps
   const [varError, setVarError] = useState<string | null>(null);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [totalFrames, setTotalFrames] = useState(0);
   const [currentTimeDisplay, setCurrentTimeDisplay] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [videoZoom, setVideoZoom] = useState(1);
 
-  // Main video ref (used for expanded VAR view and as timing reference)
   const varVideoRef = useRef<HTMLVideoElement>(null);
   const frameUpdateRef = useRef<ReturnType<typeof setInterval>>();
-  // Refs for each grid VAR video (keyed by slotId)
   const gridVideoRefs = useRef<Map<SlotId, HTMLVideoElement>>(new Map());
 
   const { startRecording: startBufferRecording, stopRecording: stopBufferRecording, getBuffer, bufferDurations } = useVideoBuffer();
   const { player, fps, init: initFramePlayer } = useFramePlayer(varVideoRef);
   const recording = useRecording();
-  const [recElapsed, setRecElapsed] = useState(0);
-  const recTimerRef = useRef<ReturnType<typeof setInterval>>();
-
-  // Update recording elapsed time every second
-  useEffect(() => {
-    if (recording.isRecording) {
-      recTimerRef.current = setInterval(() => setRecElapsed(Date.now()), 1000);
-      return () => clearInterval(recTimerRef.current);
-    } else {
-      setRecElapsed(0);
-      clearInterval(recTimerRef.current);
-    }
-  }, [recording.isRecording]);
 
   const onTrack = useCallback(
     (slotId: SlotId, stream: MediaStream) => {
@@ -88,9 +75,7 @@ export default function ArbitragePage() {
   webrtcRef.current = webrtc;
 
   useEffect(() => {
-    if (connected) {
-      send({ type: 'arbitre-join' });
-    }
+    if (connected) send({ type: 'arbitre-join' });
   }, [connected, send]);
 
   useEffect(() => {
@@ -101,10 +86,11 @@ export default function ArbitragePage() {
     }
   }, [slots]);
 
-  // === VAR trigger: single-click, captures all cameras ===
+  // === VAR trigger ===
   const handleVarPress = useCallback(() => {
     let hasAnyData = false;
     const blobs = new Map<SlotId, string>();
+    let maxDurationMs = 0;
 
     for (const slot of slots) {
       const buffer = getBuffer(slot.slotId);
@@ -114,6 +100,8 @@ export default function ArbitragePage() {
         if (blob) {
           blobs.set(slot.slotId, URL.createObjectURL(blob));
         }
+        const dur = buffer.getReplayDurationMs();
+        if (dur > maxDurationMs) maxDurationMs = dur;
       }
     }
 
@@ -123,20 +111,26 @@ export default function ArbitragePage() {
       return;
     }
 
-    // Stop buffer recording so blobs are stable for frame-by-frame
+    // Stop buffer + file recording so blobs are stable
     for (const slot of slots) {
       stopBufferRecording(slot.slotId);
     }
+    if (recording.isRecording) {
+      recording.stopAll();
+    }
 
+    setVarDurationMs(maxDurationMs);
     setVarBlobs(blobs);
     setVarMode(true);
     setExpandedSlot(null);
-  }, [slots, getBuffer, stopBufferRecording]);
+    setVideoZoom(1);
+  }, [slots, getBuffer, stopBufferRecording, recording]);
 
   const exitVarMode = useCallback(() => {
     setVarMode(false);
     setIsPlaying(false);
     setExpandedSlot(null);
+    setVideoZoom(1);
     for (const url of varBlobs.values()) {
       URL.revokeObjectURL(url);
     }
@@ -147,7 +141,7 @@ export default function ArbitragePage() {
     }
     clearInterval(frameUpdateRef.current);
 
-    // Restart buffer recording on all connected cameras
+    // Restart buffer recording
     for (const slot of slots) {
       const stream = streams.get(slot.slotId);
       if (stream && slot.cameraConnected) {
@@ -156,7 +150,7 @@ export default function ArbitragePage() {
     }
   }, [varBlobs, slots, streams, startBufferRecording]);
 
-  // Sync all grid videos to a target time
+  // Sync grid videos
   const syncGridVideos = useCallback((time: number) => {
     gridVideoRefs.current.forEach((video) => {
       if (Math.abs(video.currentTime - time) > 0.05) {
@@ -165,7 +159,16 @@ export default function ArbitragePage() {
     });
   }, []);
 
-  // === VAR expanded: load blob into main video ===
+  // Known duration in seconds
+  const varDurationSec = varDurationMs / 1000;
+  const varTotalFrames = Math.round(varDurationSec * fps);
+
+  // Helper to compute frame from currentTime using known duration
+  const getFrameFromTime = useCallback((time: number) => {
+    return Math.round(time * fps);
+  }, [fps]);
+
+  // === VAR expanded: load blob ===
   useEffect(() => {
     if (!varMode || !expandedSlot) return;
     const blobUrl = varBlobs.get(expandedSlot);
@@ -174,51 +177,46 @@ export default function ArbitragePage() {
 
     video.src = blobUrl;
     video.onloadeddata = async () => {
-      const fp = await initFramePlayer();
-      if (fp && varVideoRef.current) {
+      await initFramePlayer();
+      if (varVideoRef.current) {
         varVideoRef.current.pause();
-        varVideoRef.current.currentTime = varVideoRef.current.duration;
-        setTotalFrames(fp.getTotalFrames());
-        setCurrentFrame(fp.getTotalFrames());
-        setCurrentTimeDisplay(varVideoRef.current.duration);
+        // Seek to end using known duration
+        varVideoRef.current.currentTime = varDurationSec;
+        setTotalFrames(varTotalFrames);
+        setCurrentFrame(varTotalFrames);
+        setCurrentTimeDisplay(varDurationSec);
       }
     };
-  }, [varMode, expandedSlot, varBlobs, initFramePlayer]);
+  }, [varMode, expandedSlot, varBlobs, initFramePlayer, varDurationSec, varTotalFrames]);
 
-  // === VAR grid: init first blob into hidden video for timing reference ===
+  // === VAR grid: init reference video ===
   useEffect(() => {
     if (!varMode || expandedSlot) return;
     const video = varVideoRef.current;
     if (!video) return;
 
-    // Use the first available blob as reference
     const firstBlob = varBlobs.values().next().value;
     if (!firstBlob) return;
 
     video.src = firstBlob;
     video.onloadeddata = async () => {
-      const fp = await initFramePlayer();
-      if (fp && varVideoRef.current) {
+      await initFramePlayer();
+      if (varVideoRef.current) {
         varVideoRef.current.pause();
-        varVideoRef.current.currentTime = varVideoRef.current.duration;
-        setTotalFrames(fp.getTotalFrames());
-        setCurrentFrame(fp.getTotalFrames());
-        setCurrentTimeDisplay(varVideoRef.current.duration);
-        // Sync grid videos to end too
-        syncGridVideos(varVideoRef.current.duration);
+        varVideoRef.current.currentTime = varDurationSec;
+        setTotalFrames(varTotalFrames);
+        setCurrentFrame(varTotalFrames);
+        setCurrentTimeDisplay(varDurationSec);
+        syncGridVideos(varDurationSec);
       }
     };
-  }, [varMode, expandedSlot, varBlobs, initFramePlayer, syncGridVideos]);
+  }, [varMode, expandedSlot, varBlobs, initFramePlayer, varDurationSec, varTotalFrames, syncGridVideos]);
 
   const togglePlayPause = useCallback(() => {
     if (!player) return;
     if (player.paused) {
       player.play();
-      // Also play all grid videos
-      gridVideoRefs.current.forEach((v) => {
-        v.playbackRate = playbackRate;
-        v.play();
-      });
+      gridVideoRefs.current.forEach((v) => { v.playbackRate = playbackRate; v.play(); });
       setIsPlaying(true);
     } else {
       player.pause();
@@ -227,23 +225,23 @@ export default function ArbitragePage() {
     }
   }, [player, playbackRate]);
 
-  // Update frame counter + sync grid videos periodically
+  // Update frame counter using known duration
   useEffect(() => {
     if (varMode && player) {
       frameUpdateRef.current = setInterval(() => {
-        setCurrentFrame(player.getCurrentFrameNumber());
-        setTotalFrames(player.getTotalFrames());
-        setCurrentTimeDisplay(player.currentTime);
-        // Sync grid videos to reference
+        const time = varVideoRef.current?.currentTime || 0;
+        setCurrentFrame(getFrameFromTime(time));
+        setTotalFrames(varTotalFrames);
+        setCurrentTimeDisplay(time);
         if (!expandedSlot && varVideoRef.current) {
           syncGridVideos(varVideoRef.current.currentTime);
         }
       }, 50);
       return () => clearInterval(frameUpdateRef.current);
     }
-  }, [varMode, expandedSlot, player, syncGridVideos]);
+  }, [varMode, expandedSlot, player, syncGridVideos, varTotalFrames, getFrameFromTime]);
 
-  // Keyboard shortcuts (work in both VAR grid and VAR expanded)
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (!varMode || !player) return;
@@ -276,29 +274,14 @@ export default function ArbitragePage() {
           togglePlayPause();
           e.preventDefault();
           break;
-        case '1':
-          player.setPlaybackRate(1);
-          setPlaybackRate(1);
-          gridVideoRefs.current.forEach((v) => { v.playbackRate = 1; });
-          break;
-        case '2':
-          player.setPlaybackRate(0.5);
-          setPlaybackRate(0.5);
-          gridVideoRefs.current.forEach((v) => { v.playbackRate = 0.5; });
-          break;
-        case '3':
-          player.setPlaybackRate(0.25);
-          setPlaybackRate(0.25);
-          gridVideoRefs.current.forEach((v) => { v.playbackRate = 0.25; });
-          break;
-        case '4':
-          player.setPlaybackRate(0.1);
-          setPlaybackRate(0.1);
-          gridVideoRefs.current.forEach((v) => { v.playbackRate = 0.1; });
-          break;
+        case '1': player.setPlaybackRate(1); setPlaybackRate(1); gridVideoRefs.current.forEach((v) => { v.playbackRate = 1; }); break;
+        case '2': player.setPlaybackRate(0.5); setPlaybackRate(0.5); gridVideoRefs.current.forEach((v) => { v.playbackRate = 0.5; }); break;
+        case '3': player.setPlaybackRate(0.25); setPlaybackRate(0.25); gridVideoRefs.current.forEach((v) => { v.playbackRate = 0.25; }); break;
+        case '4': player.setPlaybackRate(0.1); setPlaybackRate(0.1); gridVideoRefs.current.forEach((v) => { v.playbackRate = 0.1; }); break;
         case 'Escape':
           if (expandedSlot) {
             setExpandedSlot(null);
+            setVideoZoom(1);
             if (varVideoRef.current) varVideoRef.current.pause();
             setIsPlaying(false);
           } else {
@@ -337,7 +320,6 @@ export default function ArbitragePage() {
     player.stepForward(frames);
     gridVideoRefs.current.forEach((v) => v.pause());
     setIsPlaying(false);
-    // Sync after a tick to let the reference video update
     setTimeout(() => {
       if (varVideoRef.current) syncGridVideos(varVideoRef.current.currentTime);
     }, 30);
@@ -372,60 +354,58 @@ export default function ArbitragePage() {
     }
   }, [recording, slots, streams]);
 
-  const expandedSlotInfo = slots.find((s) => s.slotId === expandedSlot);
+  // Zoom on expanded video (scroll wheel)
+  const handleVideoWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    setVideoZoom((z) => Math.max(1, Math.min(5, z + (e.deltaY < 0 ? 0.25 : -0.25))));
+  }, []);
 
+  const expandedSlotInfo = slots.find((s) => s.slotId === expandedSlot);
   const isLiveGrid = !varMode && !expandedSlot;
   const isLiveExpanded = !varMode && expandedSlot !== null;
   const isVarGrid = varMode && !expandedSlot;
   const isVarExpanded = varMode && expandedSlot !== null;
 
-  // Shared VAR controls (used in both grid and expanded)
+  // Shared VAR controls
   const renderVarControls = () => (
-    <div
-      style={{
-        padding: '12px 16px',
-        background: 'var(--bg-surface)',
-        borderTop: '1px solid var(--border)',
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 12,
-      }}
-    >
-      {/* Frame controls */}
+    <div style={{
+      padding: '8px 12px',
+      background: 'var(--bg-surface)',
+      borderTop: '1px solid var(--border)',
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+    }}>
       <div className="flex items-center gap-2">
-        <button className="btn" onClick={() => handleStepBackward(10)}>
-          {'\u25C0\u25C0'} -10f
+        <button className="btn" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => handleStepBackward(10)}>
+          {'\u25C0\u25C0'} -10
         </button>
-        <button className="btn" onClick={() => handleStepBackward(1)}>
-          {'\u25C0'} -1f
+        <button className="btn" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => handleStepBackward(1)}>
+          {'\u25C0'} -1
         </button>
-        <button className="btn" onClick={togglePlayPause} style={{ minWidth: 60 }}>
+        <button className="btn" style={{ padding: '6px 16px', fontSize: '0.9rem' }} onClick={togglePlayPause}>
           {isPlaying ? '\u23F8' : '\u25B6'}
         </button>
-        <button className="btn" onClick={() => handleStepForward(1)}>
-          +1f {'\u25B6'}
+        <button className="btn" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => handleStepForward(1)}>
+          +1 {'\u25B6'}
         </button>
-        <button className="btn" onClick={() => handleStepForward(10)}>
-          +10f {'\u25B6\u25B6'}
+        <button className="btn" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => handleStepForward(10)}>
+          +10 {'\u25B6\u25B6'}
         </button>
       </div>
 
-      {/* Frame info */}
-      <div className="font-mono text-cyan" style={{ fontSize: '0.9rem' }}>
-        FRAME : {currentFrame} / {totalFrames}
+      <div className="font-mono text-cyan" style={{ fontSize: '0.85rem' }}>
+        {currentFrame} / {totalFrames}
       </div>
 
-      {/* Speed controls */}
       <div className="flex items-center gap-2">
-        <span className="text-muted" style={{ fontSize: '0.8rem', textTransform: 'uppercase' }}>
-          Vitesse :
-        </span>
         {[0.1, 0.25, 0.5, 1].map((rate) => (
           <button
             key={rate}
             className={`speed-btn ${playbackRate === rate ? 'active' : ''}`}
+            style={{ padding: '4px 8px', fontSize: '0.75rem' }}
             onClick={() => handleSpeedChange(rate)}
           >
             {rate}x
@@ -435,13 +415,11 @@ export default function ArbitragePage() {
     </div>
   );
 
-  // Shared timeline (used in both grid and expanded)
   const renderTimeline = () => (
-    <div style={{ padding: '8px 16px' }}>
+    <div style={{ padding: '4px 12px' }}>
       <VarTimeline
-        durationMs={(varVideoRef.current?.duration || 0) * 1000}
+        durationMs={varDurationMs}
         currentTimeMs={currentTimeDisplay * 1000}
-        bufferDurationMs={(varVideoRef.current?.duration || 0) * 1000}
         fps={fps}
         onSeek={handleSeek}
       />
@@ -449,8 +427,8 @@ export default function ArbitragePage() {
   );
 
   return (
-    <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', paddingBottom: 60 }}>
-      {/* Hidden reference video for VAR grid mode (invisible when expanded — the expanded view uses it directly) */}
+    <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Hidden ref video for VAR grid */}
       {isVarGrid && (
         <video ref={varVideoRef} style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} playsInline muted />
       )}
@@ -459,188 +437,94 @@ export default function ArbitragePage() {
       <div
         className={varMode ? 'var-header' : ''}
         style={{
-          padding: '8px 16px',
+          padding: '6px 16px',
           background: varMode ? undefined : 'var(--bg-surface)',
           borderBottom: varMode ? undefined : '1px solid var(--border)',
           display: 'flex',
           alignItems: 'center',
-          gap: 16,
+          gap: 12,
+          flexShrink: 0,
         }}
       >
-        <span
-          style={{
-            fontFamily: 'var(--font-ui)',
-            fontWeight: 700,
-            color: varMode ? 'var(--red)' : 'var(--cyan)',
-            textTransform: 'uppercase',
-            letterSpacing: '0.15em',
-            fontSize: '1rem',
-          }}
-        >
+        <span style={{
+          fontFamily: 'var(--font-ui)', fontWeight: 700,
+          color: varMode ? 'var(--red)' : 'var(--cyan)',
+          textTransform: 'uppercase', letterSpacing: '0.15em', fontSize: '0.9rem',
+        }}>
           {varMode ? 'MODE VAR' : 'SABER VAR'}
         </span>
-        <span className="text-muted" style={{ fontSize: '0.85rem', flex: 1 }}>
+        <span className="text-muted" style={{ fontSize: '0.8rem', flex: 1 }}>
           {connected ? '\u25CF Connecté' : '\u25CB Déconnecté'}
         </span>
-        <a href="/setup" className="btn" style={{ textDecoration: 'none', fontSize: '0.75rem', padding: '6px 12px' }}>
-          Setup
-        </a>
-        <a href="/settings" className="btn" style={{ textDecoration: 'none', fontSize: '0.75rem', padding: '6px 12px' }}>
-          Paramètres
-        </a>
-        {isVarExpanded && expandedSlotInfo && (
-          <span style={{ fontFamily: 'var(--font-ui)', fontWeight: 600, color: 'var(--text)', textTransform: 'uppercase' }}>
-            Caméra: {expandedSlotInfo.name}
-          </span>
+        {(isLiveExpanded || isVarExpanded) && (
+          <button className="btn" style={{ padding: '4px 10px', fontSize: '0.75rem' }} onClick={() => {
+            setExpandedSlot(null);
+            setVideoZoom(1);
+            if (varMode && varVideoRef.current) { varVideoRef.current.pause(); setIsPlaying(false); }
+          }}>
+            {'\u2190'} 4 Caméras
+          </button>
         )}
+        <a href="/setup" className="btn" style={{ textDecoration: 'none', fontSize: '0.7rem', padding: '4px 10px' }}>Setup</a>
+        <a href="/settings" className="btn" style={{ textDecoration: 'none', fontSize: '0.7rem', padding: '4px 10px' }}>Paramètres</a>
       </div>
 
       {/* ============ MODE 1: Live Grid ============ */}
       {isLiveGrid && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-          <div
-            style={{
-              flex: 1,
-              display: 'grid',
-              gridTemplateColumns: 'repeat(2, 1fr)',
-              gridTemplateRows: 'repeat(2, 1fr)',
-              gap: 4,
-              padding: 4,
-              minHeight: 0,
-            }}
-          >
-            {slots.map((slot) => (
-              <CameraTile
-                key={slot.slotId}
-                slot={slot}
-                stream={streams.get(slot.slotId) || null}
-                selected={false}
-                onClick={() => setExpandedSlot(slot.slotId)}
-              />
-            ))}
-            {slots.length === 0 && (
-              <div
-                style={{
-                  gridColumn: '1 / -1',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'var(--text-dim)',
-                  fontFamily: 'var(--font-ui)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.1em',
-                }}
-              >
-                En attente de la configuration...
-                <br />
-                <a href="/setup" style={{ color: 'var(--cyan)', marginLeft: 8 }}>
-                  Page setup
-                </a>
-              </div>
-            )}
-          </div>
+        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gridTemplateRows: 'repeat(2, 1fr)', gap: 4, padding: 4, minHeight: 0 }}>
+          {slots.map((slot) => (
+            <CameraTile key={slot.slotId} slot={slot} stream={streams.get(slot.slotId) || null} selected={false} onClick={() => setExpandedSlot(slot.slotId)} />
+          ))}
+          {slots.length === 0 && (
+            <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontFamily: 'var(--font-ui)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+              En attente... <a href="/setup" style={{ color: 'var(--cyan)', marginLeft: 8 }}>Page setup</a>
+            </div>
+          )}
         </div>
       )}
 
       {/* ============ MODE 2: Live Expanded ============ */}
       {isLiveExpanded && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <div style={{ padding: '8px 16px' }}>
-            <button className="btn" onClick={() => setExpandedSlot(null)}>
-              {'\u2190'} 4 Caméras
-            </button>
-          </div>
-          <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
-            {(() => {
-              const stream = expandedSlot !== null ? streams.get(expandedSlot) : null;
-              const slotInfo = slots.find((s) => s.slotId === expandedSlot);
-              if (stream) {
-                return <LiveExpandedVideo stream={stream} />;
-              }
-              return (
-                <div style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-ui)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                  {slotInfo?.cameraConnected ? 'Connexion...' : 'Hors ligne'}
-                </div>
-              );
-            })()}
-            {expandedSlotInfo && (
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 12,
-                  left: 12,
-                  fontFamily: 'var(--font-ui)',
-                  fontWeight: 600,
-                  fontSize: '1rem',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.1em',
-                  color: 'var(--cyan)',
-                  background: '#000000aa',
-                  padding: '4px 12px',
-                  border: '1px solid var(--cyan-border)',
-                }}
-              >
-                {expandedSlotInfo.name}
-              </div>
-            )}
-          </div>
+        <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}
+          onWheel={handleVideoWheel}
+        >
+          {(() => {
+            const stream = expandedSlot !== null ? streams.get(expandedSlot) : null;
+            if (stream) return <LiveExpandedVideo stream={stream} zoom={videoZoom} />;
+            const slotInfo = slots.find((s) => s.slotId === expandedSlot);
+            return <div style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-ui)', textTransform: 'uppercase' }}>{slotInfo?.cameraConnected ? 'Connexion...' : 'Hors ligne'}</div>;
+          })()}
+          {expandedSlotInfo && (
+            <div style={{ position: 'absolute', top: 8, left: 8, fontFamily: 'var(--font-ui)', fontWeight: 600, fontSize: '0.9rem', textTransform: 'uppercase', color: 'var(--cyan)', background: '#000000aa', padding: '2px 10px', border: '1px solid var(--cyan-border)' }}>
+              {expandedSlotInfo.name}
+            </div>
+          )}
+          {videoZoom > 1 && (
+            <div style={{ position: 'absolute', bottom: 8, right: 8, fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--cyan)', background: '#000000aa', padding: '2px 8px', border: '1px solid var(--cyan-border)' }}>
+              {videoZoom.toFixed(1)}x zoom
+            </div>
+          )}
         </div>
       )}
 
-      {/* ============ MODE 3: VAR Grid — 4 replays simultanés ============ */}
+      {/* ============ MODE 3: VAR Grid ============ */}
       {isVarGrid && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-          <div
-            style={{
-              flex: 1,
-              display: 'grid',
-              gridTemplateColumns: 'repeat(2, 1fr)',
-              gridTemplateRows: 'repeat(2, 1fr)',
-              gap: 4,
-              padding: 4,
-              minHeight: 0,
-            }}
-          >
+          <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gridTemplateRows: 'repeat(2, 1fr)', gap: 4, padding: 4, minHeight: 0 }}>
             {slots.map((slot) => {
               const blobUrl = varBlobs.get(slot.slotId);
               return (
-                <div
-                  key={slot.slotId}
-                  className={`camera-tile ${blobUrl ? 'var-available' : 'offline'}`}
-                  onClick={() => blobUrl && setExpandedSlot(slot.slotId)}
-                  style={{ cursor: blobUrl ? 'pointer' : 'default' }}
-                >
+                <div key={slot.slotId} className={`camera-tile ${blobUrl ? 'var-available' : 'offline'}`} onClick={() => blobUrl && setExpandedSlot(slot.slotId)} style={{ cursor: blobUrl ? 'pointer' : 'default' }}>
                   {blobUrl ? (
-                    <VarGridVideo
-                      blobUrl={blobUrl}
-                      registerRef={(el) => {
-                        if (el) gridVideoRefs.current.set(slot.slotId, el);
-                        else gridVideoRefs.current.delete(slot.slotId);
-                      }}
-                    />
+                    <VarGridVideo blobUrl={blobUrl} registerRef={(el) => { if (el) gridVideoRefs.current.set(slot.slotId, el); else gridVideoRefs.current.delete(slot.slotId); }} />
                   ) : (
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontFamily: 'var(--font-ui)',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.1em',
-                      color: 'var(--text-dim)',
-                      fontSize: '0.9rem',
-                    }}>
-                      Pas de données
-                    </div>
+                    <div style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-ui)', textTransform: 'uppercase', fontSize: '0.85rem' }}>Pas de données</div>
                   )}
-                  <div className="label" style={{ color: blobUrl ? 'var(--red)' : undefined }}>
-                    {slot.name}
-                  </div>
+                  <div className="label" style={{ color: blobUrl ? 'var(--red)' : undefined }}>{slot.name}</div>
                 </div>
               );
             })}
           </div>
-
-          {/* Timeline + controls shared across all 4 cameras */}
           {renderTimeline()}
           {renderVarControls()}
         </div>
@@ -649,199 +533,109 @@ export default function ArbitragePage() {
       {/* ============ MODE 4: VAR Expanded ============ */}
       {isVarExpanded && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#000', minHeight: 0 }}>
-          <div style={{ padding: '8px 16px', display: 'flex', gap: 12, alignItems: 'center' }}>
-            <button className="btn" onClick={() => {
-              setExpandedSlot(null);
-              if (varVideoRef.current) varVideoRef.current.pause();
-              setIsPlaying(false);
-            }}>
-              {'\u2190'} Autres caméras
-            </button>
-          </div>
-
-          <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}
+            onWheel={handleVideoWheel}
+          >
             <video
               ref={varVideoRef}
-              style={{ maxWidth: '100%', maxHeight: '100%', background: '#000', display: 'block' }}
+              style={{ maxWidth: '100%', maxHeight: '100%', background: '#000', display: 'block', transform: `scale(${videoZoom})`, transformOrigin: 'center center', transition: 'transform 0.1s' }}
               playsInline
             />
-            <div style={{ position: 'absolute', top: 12, right: 12 }}>
-              <FrameCounter
-                currentFrame={currentFrame}
-                totalFrames={totalFrames}
-                currentTime={currentTimeDisplay}
-              />
+            <div style={{ position: 'absolute', top: 8, right: 8 }}>
+              <FrameCounter currentFrame={currentFrame} totalFrames={totalFrames} currentTime={currentTimeDisplay} />
             </div>
+            {videoZoom > 1 && (
+              <div style={{ position: 'absolute', bottom: 8, right: 8, fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--cyan)', background: '#000000aa', padding: '2px 8px', border: '1px solid var(--cyan-border)' }}>
+                {videoZoom.toFixed(1)}x zoom
+              </div>
+            )}
           </div>
-
           {renderTimeline()}
           {renderVarControls()}
         </div>
       )}
 
-      {/* ============ Bottom Action Bar (fixed overlay) ============ */}
+      {/* ============ Floating overlay buttons ============ */}
       <div style={{
         position: 'fixed',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        padding: '10px 16px',
-        background: 'var(--bg-surface)',
-        borderTop: '1px solid var(--border)',
+        bottom: 16,
+        left: '50%',
+        transform: 'translateX(-50%)',
         display: 'flex',
         alignItems: 'center',
-        justifyContent: 'center',
-        gap: 16,
-        flexWrap: 'wrap',
+        gap: 12,
         zIndex: 50,
+        pointerEvents: 'none',
       }}>
-        {/* Recording controls */}
-        {recording.isElectron && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <button
-              onClick={handleRecordToggle}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '6px 14px',
-                border: recording.isRecording ? '1px solid #ff4444' : '1px solid var(--border)',
-                borderRadius: 4,
-                background: recording.isRecording ? 'rgba(255, 68, 68, 0.15)' : 'var(--bg-surface)',
-                color: recording.isRecording ? '#ff4444' : 'var(--text)',
-                cursor: 'pointer',
-                fontFamily: 'var(--font-ui)',
-                fontWeight: 700,
-                fontSize: '0.85rem',
-                textTransform: 'uppercase',
-                letterSpacing: '0.05em',
-              }}
-            >
-              <span
-                style={{
-                  display: 'inline-block',
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: recording.isRecording ? '#ff4444' : '#666',
-                  animation: recording.isRecording ? 'rec-blink 1s ease-in-out infinite' : 'none',
-                }}
-              />
-              {recording.isRecording ? 'STOP' : 'REC'}
-            </button>
-            {recording.isRecording && (() => {
-              let totalFiles = 0;
-              let totalBytes = 0;
-              let earliestStart = Date.now();
-              recording.statuses.forEach((status) => {
-                totalFiles += status.fileCount;
-                totalBytes += status.totalSize;
-                if (status.startTime < earliestStart) earliestStart = status.startTime;
-              });
-              const elapsed = Math.floor((Date.now() - earliestStart) / 1000);
-              const hours = String(Math.floor(elapsed / 3600)).padStart(2, '0');
-              const minutes = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
-              const seconds = String(elapsed % 60).padStart(2, '0');
-              const sizeMB = Math.round(totalBytes / (1024 * 1024));
-              return (
-                <span className="font-mono" style={{ fontSize: '0.8rem', color: '#ff4444' }}>
-                  {hours}:{minutes}:{seconds} | {totalFiles} fichier{totalFiles !== 1 ? 's' : ''} | {sizeMB} MB
-                </span>
-              );
-            })()}
-            {recording.recordingFolder && !recording.isRecording && (
-              <span className="text-muted" style={{ fontSize: '0.75rem', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {recording.recordingFolder}
-              </span>
-            )}
-          </div>
+        {/* REC button — only in live mode */}
+        {!varMode && recording.isElectron && (
+          <button
+            onClick={handleRecordToggle}
+            style={{
+              pointerEvents: 'auto',
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '8px 16px',
+              border: recording.isRecording ? '2px solid #ff4444' : '2px solid var(--border)',
+              borderRadius: 24,
+              background: recording.isRecording ? 'rgba(255, 68, 68, 0.2)' : 'rgba(18, 18, 26, 0.9)',
+              color: recording.isRecording ? '#ff4444' : 'var(--text)',
+              cursor: 'pointer',
+              fontFamily: 'var(--font-ui)', fontWeight: 700, fontSize: '0.85rem',
+              textTransform: 'uppercase', letterSpacing: '0.05em',
+              backdropFilter: 'blur(8px)',
+            }}
+          >
+            <span style={{
+              display: 'inline-block', width: 10, height: 10, borderRadius: '50%',
+              background: recording.isRecording ? '#ff4444' : '#666',
+              animation: recording.isRecording ? 'rec-blink 1s ease-in-out infinite' : 'none',
+            }} />
+            {recording.isRecording ? 'STOP' : 'REC'}
+          </button>
         )}
 
-        {/* Buffer info */}
+        {/* VAR button — only in live mode */}
         {!varMode && (
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            {slots.filter((s) => s.cameraConnected).map((slot) => (
-              <span key={slot.slotId} className="text-muted" style={{ fontSize: '0.75rem' }}>
-                {slot.name}: {Math.round((bufferDurations.get(slot.slotId) || 0) / 1000)}s
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* VAR button */}
-        {!varMode && (
-          <button className="btn-var" onClick={handleVarPress}>
+          <button className="btn-var" onClick={handleVarPress} style={{ pointerEvents: 'auto', padding: '14px 40px', fontSize: '1.4rem' }}>
             VAR
           </button>
         )}
 
-        {/* Frame counter in bottom bar during VAR grid */}
-        {isVarGrid && (
-          <FrameCounter
-            currentFrame={currentFrame}
-            totalFrames={totalFrames}
-            currentTime={currentTimeDisplay}
-          />
-        )}
-
-        {/* REPRENDRE LE LIVE */}
+        {/* REPRENDRE LE LIVE — only in VAR mode */}
         {varMode && (
-          <button className="btn-live" onClick={exitVarMode}>
+          <button className="btn-live" onClick={exitVarMode} style={{ pointerEvents: 'auto', padding: '10px 24px', fontSize: '0.95rem' }}>
             REPRENDRE LE LIVE
           </button>
         )}
       </div>
 
       {/* Error toast */}
-      {varError && (
-        <div className="toast-error">
-          {varError}
-        </div>
-      )}
+      {varError && <div className="toast-error">{varError}</div>}
     </div>
   );
 }
 
-/** Live expanded video */
-function LiveExpandedVideo({ stream }: { stream: MediaStream }) {
+function LiveExpandedVideo({ stream, zoom }: { stream: MediaStream; zoom: number }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.srcObject = stream;
-    }
+    if (videoRef.current) videoRef.current.srcObject = stream;
   }, [stream]);
-
   return (
-    <video
-      ref={videoRef}
-      autoPlay
-      muted
-      playsInline
-      style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+    <video ref={videoRef} autoPlay muted playsInline
+      style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', transform: `scale(${zoom})`, transformOrigin: 'center center', transition: 'transform 0.1s' }}
     />
   );
 }
 
-/** VAR grid video tile — plays a blob URL */
 function VarGridVideo({ blobUrl, registerRef }: { blobUrl: string; registerRef: (el: HTMLVideoElement | null) => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
     registerRef(el);
     el.src = blobUrl;
-    el.currentTime = 9999; // seek to end
+    el.currentTime = 9999;
     return () => registerRef(null);
   }, [blobUrl, registerRef]);
-
-  return (
-    <video
-      ref={videoRef}
-      muted
-      playsInline
-      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-    />
-  );
+  return <video ref={videoRef} muted playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />;
 }

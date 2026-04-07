@@ -3,7 +3,6 @@ import React, { useRef, useEffect, useCallback, useState } from 'react';
 interface VarTimelineProps {
   durationMs: number;
   currentTimeMs: number;
-  bufferDurationMs: number;
   fps: number;
   onSeek: (timeMs: number) => void;
 }
@@ -11,13 +10,11 @@ interface VarTimelineProps {
 export default function VarTimeline({
   durationMs,
   currentTimeMs,
-  bufferDurationMs,
   fps,
   onSeek,
 }: VarTimelineProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [zoom, setZoom] = useState(1);
   const [tooltip, setTooltip] = useState<{ x: number; text: string } | null>(null);
   const isDragging = useRef(false);
 
@@ -41,38 +38,36 @@ export default function VarTimeline({
 
     if (durationMs <= 0) return;
 
-    const totalW = w * zoom;
-    const progress = durationMs > 0 ? currentTimeMs / durationMs : 0;
-    const scrollOffset = Math.max(0, progress * totalW - w / 2);
+    const progress = Math.min(1, Math.max(0, currentTimeMs / durationMs));
 
-    // Buffer zone
-    const bufferRatio = Math.min(1, bufferDurationMs / durationMs);
-    const bufferW = bufferRatio * totalW;
-    const bufferX = totalW - bufferW - scrollOffset;
-    ctx.fillStyle = '#00d4ff12';
-    ctx.fillRect(Math.max(0, bufferX), 0, Math.min(bufferW, w), h);
+    // Filled progress bar
+    ctx.fillStyle = '#00d4ff18';
+    ctx.fillRect(0, 0, progress * w, h);
 
-    // Time markers
-    const pxPerMs = totalW / durationMs;
+    // Time markers — simple, no zoom/scroll
+    const pxPerMs = w / durationMs;
     const secondPx = pxPerMs * 1000;
 
-    // Draw second markers
-    const startSec = Math.floor(scrollOffset / secondPx);
-    const endSec = Math.ceil((scrollOffset + w) / secondPx);
+    // Adapt tick interval to avoid clutter
+    let tickInterval = 1;
+    if (secondPx < 5) tickInterval = 10;
+    else if (secondPx < 15) tickInterval = 5;
 
-    for (let s = startSec; s <= endSec; s++) {
-      const x = s * secondPx - scrollOffset;
-      if (x < -1 || x > w + 1) continue;
+    const totalSec = Math.ceil(durationMs / 1000);
+    for (let s = 0; s <= totalSec; s++) {
+      if (s % tickInterval !== 0) continue;
+      const x = s * secondPx;
+      if (x > w) break;
 
-      const isTen = s % 10 === 0;
-      ctx.strokeStyle = isTen ? '#ffffff44' : '#ffffff18';
-      ctx.lineWidth = isTen ? 1.5 : 0.5;
+      const isBig = s % (tickInterval * 5) === 0 || s % 10 === 0;
+      ctx.strokeStyle = isBig ? '#ffffff44' : '#ffffff18';
+      ctx.lineWidth = isBig ? 1 : 0.5;
       ctx.beginPath();
-      ctx.moveTo(x, isTen ? 0 : h * 0.6);
+      ctx.moveTo(x, isBig ? 0 : h * 0.6);
       ctx.lineTo(x, h);
       ctx.stroke();
 
-      if (isTen && s > 0) {
+      if (isBig && s > 0) {
         ctx.fillStyle = '#8888aa';
         ctx.font = '10px JetBrains Mono, monospace';
         ctx.fillText(`${s}s`, x + 3, 12);
@@ -80,7 +75,7 @@ export default function VarTimeline({
     }
 
     // Cursor (current position)
-    const cursorX = progress * totalW - scrollOffset;
+    const cursorX = progress * w;
     ctx.strokeStyle = '#ff3b3b';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -88,15 +83,15 @@ export default function VarTimeline({
     ctx.lineTo(cursorX, h);
     ctx.stroke();
 
-    // Cursor head
+    // Cursor head (triangle)
     ctx.fillStyle = '#ff3b3b';
     ctx.beginPath();
-    ctx.moveTo(cursorX - 5, 0);
-    ctx.lineTo(cursorX + 5, 0);
-    ctx.lineTo(cursorX, 6);
+    ctx.moveTo(cursorX - 6, 0);
+    ctx.lineTo(cursorX + 6, 0);
+    ctx.lineTo(cursorX, 8);
     ctx.closePath();
     ctx.fill();
-  }, [durationMs, currentTimeMs, bufferDurationMs, zoom]);
+  }, [durationMs, currentTimeMs]);
 
   useEffect(() => {
     draw();
@@ -105,9 +100,7 @@ export default function VarTimeline({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
-    const handleResize = () => draw();
-    const observer = new ResizeObserver(handleResize);
+    const observer = new ResizeObserver(() => draw());
     observer.observe(canvas);
     return () => observer.disconnect();
   }, [draw]);
@@ -118,8 +111,8 @@ export default function VarTimeline({
       if (!canvas || durationMs <= 0) return 0;
       const rect = canvas.getBoundingClientRect();
       const x = clientX - rect.left;
-      const ratio = x / rect.width;
-      return Math.max(0, Math.min(durationMs, ratio * durationMs));
+      const ratio = Math.max(0, Math.min(1, x / rect.width));
+      return ratio * durationMs;
     },
     [durationMs]
   );
@@ -135,7 +128,7 @@ export default function VarTimeline({
     const frame = Math.round((timeMs / 1000) * fps);
     const rect = canvasRef.current?.getBoundingClientRect();
     if (rect) {
-      setTooltip({ x: e.clientX - rect.left, text: `T-${timeSec}s | Frame ${frame}` });
+      setTooltip({ x: e.clientX - rect.left, text: `${timeSec}s | Frame ${frame}` });
     }
     if (isDragging.current) {
       onSeek(timeMs);
@@ -151,13 +144,24 @@ export default function VarTimeline({
     setTooltip(null);
   };
 
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    setZoom((z) => Math.max(1, Math.min(20, z + (e.deltaY > 0 ? -0.5 : 0.5))));
+  // Touch support for mobile scrubbing
+  const handleTouchStart = (e: React.TouchEvent) => {
+    isDragging.current = true;
+    onSeek(getTimeFromX(e.touches[0].clientX));
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (isDragging.current) {
+      onSeek(getTimeFromX(e.touches[0].clientX));
+    }
+  };
+
+  const handleTouchEnd = () => {
+    isDragging.current = false;
   };
 
   return (
-    <div ref={containerRef} style={{ position: 'relative', width: '100%', height: 40 }}>
+    <div ref={containerRef} style={{ position: 'relative', width: '100%', height: 44 }}>
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '100%', cursor: 'pointer', display: 'block' }}
@@ -165,7 +169,9 @@ export default function VarTimeline({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
-        onWheel={handleWheel}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
       />
       {tooltip && (
         <div

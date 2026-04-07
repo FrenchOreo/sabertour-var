@@ -64,6 +64,13 @@ export class VideoBuffer {
     return new Blob(parts, { type: 'video/webm; codecs=vp8' });
   }
 
+  /** Known duration from chunk timestamps (reliable, unlike video.duration which is Infinity for WebM) */
+  getReplayDurationMs(): number {
+    const dataChunks = this.chunks.filter((c) => !c.isInit);
+    if (dataChunks.length < 2) return 0;
+    return dataChunks[dataChunks.length - 1].timestampMs - dataChunks[0].timestampMs;
+  }
+
   getBufferDurationMs(): number {
     if (this.chunks.length < 2) return 0;
     const oldest = this.chunks.find((c) => !c.isInit);
