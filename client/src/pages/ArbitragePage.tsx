@@ -53,10 +53,18 @@ export default function ArbitragePage() {
     return null;
   }, [expandedSlot]);
 
-  // Set time on ALL var videos at once
+  // Set time on ALL var videos — hide during seek to avoid first-frame flash
   const setAllVarTime = useCallback((time: number) => {
     varVideoRefs.current.forEach((v) => {
+      v.style.visibility = 'hidden';
+      const onSeeked = () => {
+        v.style.visibility = 'visible';
+        v.removeEventListener('seeked', onSeeked);
+      };
+      v.addEventListener('seeked', onSeeked);
       v.currentTime = time;
+      // Fallback: restore visibility after 500ms if seeked never fires
+      setTimeout(() => { v.style.visibility = 'visible'; }, 500);
     });
   }, []);
 
@@ -193,14 +201,30 @@ export default function ArbitragePage() {
   const togglePlayPause = useCallback(() => {
     if (isPlaying) {
       pauseAll();
-      // Read actual position from a video when pausing
       const video = getActiveVideo();
-      if (video) varTimeRef.current = video.currentTime;
+      if (video) {
+        const t = Math.min(video.currentTime, varDurationSec);
+        varTimeRef.current = t;
+        setCurrentTimeDisplay(t);
+        setCurrentFrame(Math.min(Math.round(t * fps), varTotalFrames));
+      }
     } else {
-      setAllVarTime(varTimeRef.current);
-      playAll();
+      // If near end (last 0.5s), rewind to start
+      if (varTimeRef.current >= varDurationSec - 0.5) {
+        varTimeRef.current = 0;
+        setCurrentTimeDisplay(0);
+        setCurrentFrame(0);
+      }
+      // Set all videos to the current time, then play
+      varVideoRefs.current.forEach((v) => {
+        v.style.visibility = 'visible';
+        v.currentTime = varTimeRef.current;
+        v.playbackRate = playbackRate;
+        v.play().catch(() => {});
+      });
+      setIsPlaying(true);
     }
-  }, [isPlaying, pauseAll, playAll, getActiveVideo, setAllVarTime]);
+  }, [isPlaying, pauseAll, getActiveVideo, playbackRate, varDurationSec, fps, varTotalFrames]);
 
   const handleSeek = useCallback((timeMs: number) => {
     seekTo(timeMs / 1000);
@@ -503,8 +527,13 @@ function PersistentVarVideo({ slotId, blobUrl, initialTime, registerRef, zoom }:
     registerRef(el);
     el.src = blobUrl;
     el.preload = 'auto';
+    // Hide during initial seek to avoid first-frame flash
+    el.style.visibility = 'hidden';
     el.onloadeddata = () => {
+      el.addEventListener('seeked', () => { el.style.visibility = 'visible'; }, { once: true });
       el.currentTime = initialTime;
+      // Fallback
+      setTimeout(() => { el.style.visibility = 'visible'; }, 1000);
     };
     return () => { registerRef(null); initialized.current = false; };
   }, [blobUrl, initialTime, registerRef]);
