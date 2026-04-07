@@ -640,13 +640,37 @@ export default function ArbitragePage() {
 
 function LiveExpandedVideo({ stream, zoom }: { stream: MediaStream; zoom: number }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [stats, setStats] = useState<string>('');
+
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream;
   }, [stream]);
+
+  useEffect(() => {
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+    const measure = () => {
+      const s = track.getSettings();
+      if (s.width && s.height) {
+        setStats(`${s.width}x${s.height}${s.frameRate ? ` ${Math.round(s.frameRate)}fps` : ''}`);
+      }
+    };
+    const timer = setTimeout(measure, 1000);
+    const interval = setInterval(measure, 5000);
+    return () => { clearTimeout(timer); clearInterval(interval); };
+  }, [stream]);
+
   return (
-    <video ref={videoRef} autoPlay muted playsInline
-      style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', transform: `scale(${zoom})`, transformOrigin: 'center center', transition: 'transform 0.1s' }}
-    />
+    <>
+      <video ref={videoRef} autoPlay muted playsInline
+        style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', transform: `scale(${zoom})`, transformOrigin: 'center center', transition: 'transform 0.1s' }}
+      />
+      {stats && (
+        <div style={{ position: 'absolute', bottom: 8, left: 8, fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--text-muted)', background: '#000000aa', padding: '2px 6px' }}>
+          {stats}
+        </div>
+      )}
+    </>
   );
 }
 
