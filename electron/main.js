@@ -1,9 +1,36 @@
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const { startServer } = require('./server');
 const path = require('path');
+const fs = require('fs');
 
 let mainWindow = null;
 let serverInfo = null;
+let lastRecordingFolder = null;
+
+// ── IPC Handlers for continuous recording ──
+
+ipcMain.handle('select-recording-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: 'Choisir le dossier d\'enregistrement',
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  lastRecordingFolder = result.filePaths[0];
+  return lastRecordingFolder;
+});
+
+ipcMain.handle('save-recording-chunk', async (_event, { folder, slotName, chunkIndex, data }) => {
+  const fileName = `${slotName}_${chunkIndex}.webm`;
+  const filePath = path.join(folder, fileName);
+  const buffer = Buffer.from(data);
+  await fs.promises.writeFile(filePath, buffer);
+  const stat = await fs.promises.stat(filePath);
+  return { path: filePath, size: stat.size };
+});
+
+ipcMain.handle('get-recording-folder', () => {
+  return lastRecordingFolder;
+});
 
 async function createWindow() {
   // Start the embedded server first
@@ -25,6 +52,7 @@ async function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
     },
   });
 

@@ -14,6 +14,7 @@ app.use(express.json());
 
 // Camera registry
 const registry = new CameraRegistry();
+let serverPort = 3000;
 
 // API routes
 app.use(exportRouter);
@@ -30,6 +31,10 @@ app.post('/api/setup', (req, res) => {
 
 app.get('/api/slots', (_req, res) => {
   res.json({ slots: registry.getAllSlots() });
+});
+
+app.get('/api/network', (_req, res) => {
+  res.json({ ips: getLocalIPs(), port: serverPort });
 });
 
 // Serve static client files
@@ -69,6 +74,7 @@ function getLocalIPs(): string[] {
 async function main() {
   const preferredPort = parseInt(process.env.PORT || '3000', 10);
   const port = await findFreePort(preferredPort);
+  serverPort = port;
 
   const { key, cert } = ensureCertificates();
   const server = https.createServer({ key, cert }, app);

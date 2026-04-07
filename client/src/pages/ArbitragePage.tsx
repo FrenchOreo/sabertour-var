@@ -3,6 +3,7 @@ import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCArbitre } from '../hooks/useWebRTC';
 import { useVideoBuffer } from '../hooks/useVideoBuffer';
 import { useFramePlayer, FramePlayer } from '../hooks/useFramePlayer';
+import { useRecording } from '../hooks/useRecording';
 import CameraTile from '../components/CameraTile';
 import VarTimeline from '../components/VarTimeline';
 import FrameCounter from '../components/FrameCounter';
@@ -26,6 +27,20 @@ export default function ArbitragePage() {
 
   const { startRecording, stopRecording, getBuffer, bufferDurations } = useVideoBuffer();
   const { player, fps, init: initFramePlayer } = useFramePlayer(varVideoRef);
+  const recording = useRecording();
+  const [recElapsed, setRecElapsed] = useState(0);
+  const recTimerRef = useRef<ReturnType<typeof setInterval>>();
+
+  // Update recording elapsed time every second
+  useEffect(() => {
+    if (recording.isRecording) {
+      recTimerRef.current = setInterval(() => setRecElapsed(Date.now()), 1000);
+      return () => clearInterval(recTimerRef.current);
+    } else {
+      setRecElapsed(0);
+      clearInterval(recTimerRef.current);
+    }
+  }, [recording.isRecording]);
 
   const onTrack = useCallback(
     (slotId: SlotId, stream: MediaStream) => {
@@ -228,6 +243,28 @@ export default function ArbitragePage() {
     [player]
   );
 
+  // Recording: start all connected streams
+  const handleRecordToggle = useCallback(async () => {
+    if (recording.isRecording) {
+      recording.stopAll();
+      return;
+    }
+
+    let folder = recording.recordingFolder;
+    if (!folder) {
+      folder = await recording.selectFolder();
+      if (!folder) return; // user cancelled
+    }
+
+    // Start recording all connected camera streams
+    for (const slot of slots) {
+      const stream = streams.get(slot.slotId);
+      if (slot.cameraConnected && stream) {
+        recording.startRecording(slot.slotId, slot.name, stream, folder);
+      }
+    }
+  }, [recording, slots, streams]);
+
   // Select first slot with camera by default
   useEffect(() => {
     if (!selectedSlot) {
@@ -425,6 +462,72 @@ export default function ArbitragePage() {
               borderTop: '1px solid var(--border)',
             }}
           >
+            {/* Recording controls */}
+            {recording.isElectron && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  onClick={handleRecordToggle}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '6px 14px',
+                    border: recording.isRecording ? '1px solid #ff4444' : '1px solid var(--border)',
+                    borderRadius: 4,
+                    background: recording.isRecording ? 'rgba(255, 68, 68, 0.15)' : 'var(--bg-surface)',
+                    color: recording.isRecording ? '#ff4444' : 'var(--text)',
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-ui)',
+                    fontWeight: 700,
+                    fontSize: '0.85rem',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                  }}
+                >
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: recording.isRecording ? '#ff4444' : '#666',
+                      animation: recording.isRecording ? 'rec-blink 1s ease-in-out infinite' : 'none',
+                    }}
+                  />
+                  {recording.isRecording ? 'STOP' : 'REC'}
+                </button>
+                {recording.isRecording && (() => {
+                  // Aggregate stats across all slots
+                  let totalFiles = 0;
+                  let totalBytes = 0;
+                  let earliestStart = Date.now();
+                  recording.statuses.forEach((status) => {
+                    totalFiles += status.fileCount;
+                    totalBytes += status.totalSize;
+                    if (status.startTime < earliestStart) earliestStart = status.startTime;
+                  });
+                  const elapsed = Math.floor((Date.now() - earliestStart) / 1000);
+                  const hours = String(Math.floor(elapsed / 3600)).padStart(2, '0');
+                  const minutes = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
+                  const seconds = String(elapsed % 60).padStart(2, '0');
+                  const sizeMB = Math.round(totalBytes / (1024 * 1024));
+                  return (
+                    <span
+                      className="font-mono"
+                      style={{ fontSize: '0.8rem', color: '#ff4444' }}
+                    >
+                      {hours}:{minutes}:{seconds} | {totalFiles} fichier{totalFiles !== 1 ? 's' : ''} | {sizeMB} MB
+                    </span>
+                  );
+                })()}
+                {recording.recordingFolder && !recording.isRecording && (
+                  <span className="text-muted" style={{ fontSize: '0.75rem', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {recording.recordingFolder}
+                  </span>
+                )}
+              </div>
+            )}
+
             {selectedSlot && (
               <span className="text-muted" style={{ fontSize: '0.85rem' }}>
                 Buffer : {Math.round((bufferDurations.get(selectedSlot) || 0) / 1000)}s

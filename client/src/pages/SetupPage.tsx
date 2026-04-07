@@ -14,6 +14,9 @@ export default function SetupPage() {
   const [slots, setSlots] = useState<SlotState[] | null>(null);
   const [qrCodes, setQrCodes] = useState<Map<number, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const [lanIps, setLanIps] = useState<string[]>([]);
+  const [lanPort, setLanPort] = useState<number | null>(null);
+  const [selectedIp, setSelectedIp] = useState<string | null>(null);
 
   const handleNameChange = (id: number, name: string) => {
     setSlotNames((prev) => ({ ...prev, [id]: name }));
@@ -35,6 +38,22 @@ export default function SetupPage() {
     }
   };
 
+  // Fetch LAN IPs on mount
+  useEffect(() => {
+    fetch('/api/network')
+      .then((r) => r.json())
+      .then((data: { ips: string[]; port: number }) => {
+        if (data.ips && data.ips.length > 0) {
+          setLanIps(data.ips);
+          setLanPort(data.port);
+          setSelectedIp(data.ips[0]);
+        }
+      })
+      .catch(() => {
+        // Fallback: no LAN info available (dev mode)
+      });
+  }, []);
+
   // Check if already configured
   useEffect(() => {
     fetch('/api/slots')
@@ -52,10 +71,14 @@ export default function SetupPage() {
       .catch(() => {});
   }, []);
 
-  // Generate QR codes when slots are available
+  // Compute base URL from LAN IP or fallback to window.location
+  const baseUrl = selectedIp && lanPort
+    ? `${window.location.protocol}//${selectedIp}:${lanPort}`
+    : `${window.location.protocol}//${window.location.host}`;
+
+  // Generate QR codes when slots are available or selected IP changes
   useEffect(() => {
     if (!slots) return;
-    const baseUrl = `${window.location.protocol}//${window.location.host}`;
     slots.forEach(async (slot) => {
       const url = `${baseUrl}/camera?slot=${slot.slotId}&token=${slot.token}`;
       const dataUrl = await QRCode.toDataURL(url, {
@@ -65,27 +88,70 @@ export default function SetupPage() {
       });
       setQrCodes((prev) => new Map(prev).set(slot.slotId, dataUrl));
     });
-  }, [slots]);
+  }, [slots, baseUrl]);
 
   return (
     <div style={{ minHeight: '100vh', padding: 24 }}>
       <div style={{ maxWidth: 800, margin: '0 auto' }}>
-        <h1
-          style={{
-            fontFamily: 'var(--font-ui)',
-            fontWeight: 700,
-            fontSize: '2rem',
-            color: 'var(--cyan)',
-            textTransform: 'uppercase',
-            letterSpacing: '0.15em',
-            marginBottom: 8,
-          }}
-        >
-          SABER VAR
-        </h1>
-        <p className="text-muted" style={{ marginBottom: 32 }}>
+        <div className="flex items-center gap-4" style={{ marginBottom: 8 }}>
+          <h1
+            style={{
+              fontFamily: 'var(--font-ui)',
+              fontWeight: 700,
+              fontSize: '2rem',
+              color: 'var(--cyan)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.15em',
+              flex: 1,
+            }}
+          >
+            SABER VAR
+          </h1>
+          <a href="/guide" className="btn" style={{ textDecoration: 'none', fontSize: '0.85rem' }}>
+            Guide
+          </a>
+        </div>
+        <p className="text-muted" style={{ marginBottom: 16 }}>
           Configuration du système VAR — Saber Tour
         </p>
+
+        {lanIps.length > 0 && (
+          <div className="card" style={{ marginBottom: 24, padding: 16 }}>
+            <div className="flex items-center gap-4" style={{ marginBottom: 8 }}>
+              <label style={{ fontWeight: 600, fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Adresse réseau :
+              </label>
+              {lanIps.length > 1 ? (
+                <select
+                  className="input"
+                  value={selectedIp || ''}
+                  onChange={(e) => setSelectedIp(e.target.value)}
+                  style={{ flex: 1, maxWidth: 300 }}
+                >
+                  {lanIps.map((ip) => (
+                    <option key={ip} value={ip}>{ip}</option>
+                  ))}
+                </select>
+              ) : (
+                <span className="font-mono" style={{ color: 'var(--cyan)' }}>{lanIps[0]}</span>
+              )}
+            </div>
+            <div
+              className="font-mono"
+              style={{
+                fontSize: '1.1rem',
+                fontWeight: 700,
+                color: 'var(--cyan)',
+                padding: '8px 12px',
+                background: 'rgba(0, 212, 255, 0.08)',
+                borderRadius: 6,
+                wordBreak: 'break-all',
+              }}
+            >
+              {baseUrl}
+            </div>
+          </div>
+        )}
 
         {!slots ? (
           <div className="card" style={{ marginBottom: 24 }}>

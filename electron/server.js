@@ -155,6 +155,10 @@ async function startServer() {
     res.json({ slots: registry.getAllSlots() });
   });
 
+  appExpress.get('/api/network', (_req, res) => {
+    res.json({ ips: getLocalIPs(), port });
+  });
+
   // Serve static client files
   const clientDist = path.join(__dirname, '..', 'client', 'dist');
   appExpress.use(express.static(clientDist));
