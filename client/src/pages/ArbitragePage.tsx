@@ -28,7 +28,7 @@ export default function ArbitragePage() {
   // Refs for each grid VAR video (keyed by slotId)
   const gridVideoRefs = useRef<Map<SlotId, HTMLVideoElement>>(new Map());
 
-  const { startRecording, getBuffer, bufferDurations } = useVideoBuffer();
+  const { startRecording: startBufferRecording, stopRecording: stopBufferRecording, getBuffer, bufferDurations } = useVideoBuffer();
   const { player, fps, init: initFramePlayer } = useFramePlayer(varVideoRef);
   const recording = useRecording();
   const [recElapsed, setRecElapsed] = useState(0);
@@ -48,9 +48,9 @@ export default function ArbitragePage() {
   const onTrack = useCallback(
     (slotId: SlotId, stream: MediaStream) => {
       setStreams((prev) => new Map(prev).set(slotId, stream));
-      startRecording(slotId, stream);
+      startBufferRecording(slotId, stream);
     },
-    [startRecording]
+    [startBufferRecording]
   );
 
   const webrtcRef = useRef<ReturnType<typeof useWebRTCArbitre>>(null!);
@@ -123,10 +123,15 @@ export default function ArbitragePage() {
       return;
     }
 
+    // Stop buffer recording so blobs are stable for frame-by-frame
+    for (const slot of slots) {
+      stopBufferRecording(slot.slotId);
+    }
+
     setVarBlobs(blobs);
     setVarMode(true);
     setExpandedSlot(null);
-  }, [slots, getBuffer]);
+  }, [slots, getBuffer, stopBufferRecording]);
 
   const exitVarMode = useCallback(() => {
     setVarMode(false);
@@ -141,7 +146,15 @@ export default function ArbitragePage() {
       varVideoRef.current.src = '';
     }
     clearInterval(frameUpdateRef.current);
-  }, [varBlobs]);
+
+    // Restart buffer recording on all connected cameras
+    for (const slot of slots) {
+      const stream = streams.get(slot.slotId);
+      if (stream && slot.cameraConnected) {
+        startBufferRecording(slot.slotId, stream);
+      }
+    }
+  }, [varBlobs, slots, streams, startBufferRecording]);
 
   // Sync all grid videos to a target time
   const syncGridVideos = useCallback((time: number) => {
@@ -436,7 +449,7 @@ export default function ArbitragePage() {
   );
 
   return (
-    <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', paddingBottom: 60 }}>
       {/* Hidden reference video for VAR grid mode (invisible when expanded — the expanded view uses it directly) */}
       {isVarGrid && (
         <video ref={varVideoRef} style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} playsInline muted />
@@ -666,9 +679,13 @@ export default function ArbitragePage() {
         </div>
       )}
 
-      {/* ============ Bottom Action Bar (always visible) ============ */}
+      {/* ============ Bottom Action Bar (fixed overlay) ============ */}
       <div style={{
-        padding: '12px 16px',
+        position: 'fixed',
+        bottom: 0,
+        left: 0,
+        right: 0,
+        padding: '10px 16px',
         background: 'var(--bg-surface)',
         borderTop: '1px solid var(--border)',
         display: 'flex',
@@ -676,6 +693,7 @@ export default function ArbitragePage() {
         justifyContent: 'center',
         gap: 16,
         flexWrap: 'wrap',
+        zIndex: 50,
       }}>
         {/* Recording controls */}
         {recording.isElectron && (

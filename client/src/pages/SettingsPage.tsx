@@ -3,7 +3,8 @@ import { SlotState } from 'shared/types';
 import {
   getResolution, setResolution, RESOLUTION_OPTIONS,
   getBitrateLevel, setBitrateLevel, BITRATE_OPTIONS,
-  Resolution, BitrateLevel,
+  getRecordingFormat, setRecordingFormat, FORMAT_OPTIONS,
+  Resolution, BitrateLevel, RecordingFormat,
 } from '../lib/qualitySettings';
 
 const STORAGE_KEY = 'saber-var-selected-ip';
@@ -19,6 +20,7 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [resolution, setResolutionState] = useState<Resolution>(getResolution);
   const [bitrateLevel, setBitrateLevelState] = useState<BitrateLevel>(getBitrateLevel);
+  const [recordingFormat, setRecordingFormatState] = useState<RecordingFormat>(getRecordingFormat);
   const [qualitySaved, setQualitySaved] = useState(false);
 
   // Fetch network info on mount
@@ -402,12 +404,41 @@ export default function SettingsPage() {
             </select>
           </div>
 
+          <div style={{ marginBottom: 16 }}>
+            <label
+              className="text-muted"
+              style={{
+                display: 'block',
+                fontSize: '0.85rem',
+                marginBottom: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              Format d'enregistrement :
+            </label>
+            <select
+              className="input"
+              value={recordingFormat}
+              onChange={(e) => setRecordingFormatState(e.target.value as RecordingFormat)}
+              style={{ maxWidth: 300 }}
+            >
+              {FORMAT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <p className="text-muted" style={{ fontSize: '0.75rem', marginTop: 4 }}>
+              MP4 (H.264) peut ne pas être supporté sur tous les navigateurs.
+            </p>
+          </div>
+
           <div className="flex items-center gap-4">
             <button
               className="btn"
               onClick={() => {
                 setResolution(resolution);
                 setBitrateLevel(bitrateLevel);
+                setRecordingFormat(recordingFormat);
                 setQualitySaved(true);
                 setTimeout(() => setQualitySaved(false), 2000);
               }}

@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import type { SlotId } from 'shared/types';
-import { getBitrate } from '../lib/qualitySettings';
+import { getBitrate, getRecordingMimeType, getRecordingExtension } from '../lib/qualitySettings';
 
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
 
@@ -41,7 +41,7 @@ export function useRecording() {
 
   const saveChunks = useCallback(async (state: SlotRecordingState, folder: string) => {
     if (state.chunks.length === 0) return;
-    const blob = new Blob(state.chunks, { type: 'video/webm; codecs=vp8' });
+    const blob = new Blob(state.chunks, { type: getRecordingMimeType() });
     const arrayBuffer = await blob.arrayBuffer();
     const data = new Uint8Array(arrayBuffer);
 
@@ -80,14 +80,7 @@ export function useRecording() {
 
   const createRecorder = useCallback(
     (slotId: SlotId, state: SlotRecordingState, folder: string) => {
-      const mimeTypes = ['video/webm; codecs=vp8', 'video/webm', 'video/mp4'];
-      let mimeType = '';
-      for (const mt of mimeTypes) {
-        if (MediaRecorder.isTypeSupported(mt)) {
-          mimeType = mt;
-          break;
-        }
-      }
+      const mimeType = getRecordingMimeType();
       if (!mimeType) {
         console.error('[Recording] No supported MediaRecorder mimeType');
         return null;
