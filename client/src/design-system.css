@@ -233,3 +233,59 @@ html, body, #root {
 .font-mono { font-family: var(--font-mono); }
 .uppercase { text-transform: uppercase; }
 .tracking-wide { letter-spacing: 0.1em; }
+
+/* VAR header */
+.var-header {
+  background: var(--red-dim);
+  border-bottom: 2px solid var(--red);
+}
+
+/* Live resume button */
+.btn-live {
+  background: transparent;
+  border: 2px solid #00ff88;
+  color: #00ff88;
+  font-family: var(--font-ui);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 12px 32px;
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-live:hover {
+  background: #00ff8822;
+  box-shadow: 0 0 20px #00ff8844;
+}
+
+/* VAR available camera tiles */
+.camera-tile.var-available {
+  border-color: var(--red-border);
+  cursor: pointer;
+}
+.camera-tile.var-available:hover {
+  box-shadow: var(--glow-red);
+}
+
+/* Error toast */
+.toast-error {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  color: #fff;
+  padding: 12px 24px;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 0.95rem;
+  z-index: 100;
+  animation: toast-in 0.2s ease-out;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
