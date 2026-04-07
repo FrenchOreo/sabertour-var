@@ -28,9 +28,9 @@ export default function ArbitragePage() {
 
   // Persistent VAR video refs — one per camera, never unmounted during VAR
   const varVideoRefs = useRef<Map<SlotId, HTMLVideoElement>>(new Map());
-  // Which slot is the "active" one for frame control (first available or expanded)
-  const activeVarSlotRef = useRef<SlotId | null>(null);
   const frameUpdateRef = useRef<ReturnType<typeof setInterval>>();
+  // Track time in JS (not from video.currentTime which is async/unreliable on WebM)
+  const varTimeRef = useRef(0);
   const wasRecordingBeforeVar = useRef(false);
   const recordingFolderBeforeVar = useRef<string | null>(null);
 
@@ -141,6 +141,7 @@ export default function ArbitragePage() {
     setExpandedSlot(null);
     setVideoZoom(1);
     setPlaybackRate(1);
+    varTimeRef.current = maxDurationMs / 1000;
     setCurrentTimeDisplay(maxDurationMs / 1000);
     setCurrentFrame(Math.round((maxDurationMs / 1000) * FPS_DEFAULT));
     setTotalFrames(Math.round((maxDurationMs / 1000) * FPS_DEFAULT));
@@ -170,56 +171,63 @@ export default function ArbitragePage() {
     wasRecordingBeforeVar.current = false;
   }, [varBlobs, slots, streams, startBufferRecording, recording]);
 
-  // ============ Frame stepping (direct, no FramePlayer) ============
+  // ============ Frame stepping — uses varTimeRef as source of truth ============
+  const seekTo = useCallback((time: number) => {
+    const clamped = Math.max(0, Math.min(time, varDurationSec));
+    varTimeRef.current = clamped;
+    setAllVarTime(clamped);
+    setCurrentTimeDisplay(clamped);
+    setCurrentFrame(Math.min(Math.round(clamped * fps), varTotalFrames));
+  }, [varDurationSec, setAllVarTime, fps, varTotalFrames]);
+
   const stepForward = useCallback((frames: number) => {
-    const video = getActiveVideo();
-    if (!video) return;
-    const target = Math.min(video.currentTime + frameInterval * frames, varDurationSec);
-    setAllVarTime(target);
     pauseAll();
-  }, [getActiveVideo, frameInterval, varDurationSec, setAllVarTime, pauseAll]);
+    seekTo(varTimeRef.current + frameInterval * frames);
+  }, [frameInterval, seekTo, pauseAll]);
 
   const stepBackward = useCallback((frames: number) => {
-    const video = getActiveVideo();
-    if (!video) return;
-    const target = Math.max(0, video.currentTime - frameInterval * frames);
-    setAllVarTime(target);
     pauseAll();
-  }, [getActiveVideo, frameInterval, setAllVarTime, pauseAll]);
+    seekTo(varTimeRef.current - frameInterval * frames);
+  }, [frameInterval, seekTo, pauseAll]);
 
   const togglePlayPause = useCallback(() => {
     if (isPlaying) {
       pauseAll();
-    } else {
-      // Sync all to same time before playing
+      // Read actual position from a video when pausing
       const video = getActiveVideo();
-      if (video) setAllVarTime(video.currentTime);
+      if (video) varTimeRef.current = video.currentTime;
+    } else {
+      setAllVarTime(varTimeRef.current);
       playAll();
     }
   }, [isPlaying, pauseAll, playAll, getActiveVideo, setAllVarTime]);
 
   const handleSeek = useCallback((timeMs: number) => {
-    setAllVarTime(timeMs / 1000);
-  }, [setAllVarTime]);
+    seekTo(timeMs / 1000);
+  }, [seekTo]);
 
   const handleSpeedChange = useCallback((rate: number) => {
     setPlaybackRate(rate);
     varVideoRefs.current.forEach((v) => { v.playbackRate = rate; });
   }, []);
 
-  // Update frame counter
+  // Update frame counter — during play, read from video; during pause, varTimeRef is truth
   useEffect(() => {
     if (!varMode) return;
     frameUpdateRef.current = setInterval(() => {
-      const video = getActiveVideo();
-      if (!video) return;
-      const time = Math.min(video.currentTime, varDurationSec);
-      setCurrentFrame(Math.min(Math.round(time * fps), varTotalFrames));
-      setTotalFrames(varTotalFrames);
-      setCurrentTimeDisplay(time);
+      if (isPlaying) {
+        const video = getActiveVideo();
+        if (!video) return;
+        const time = Math.min(video.currentTime, varDurationSec);
+        varTimeRef.current = time;
+        setCurrentFrame(Math.min(Math.round(time * fps), varTotalFrames));
+        setTotalFrames(varTotalFrames);
+        setCurrentTimeDisplay(time);
+      }
+      // When paused, display is already set by seekTo/stepForward/stepBackward
     }, 50);
     return () => clearInterval(frameUpdateRef.current);
-  }, [varMode, getActiveVideo, varDurationSec, varTotalFrames, fps]);
+  }, [varMode, isPlaying, getActiveVideo, varDurationSec, varTotalFrames, fps]);
 
   // Keyboard shortcuts
   useEffect(() => {
