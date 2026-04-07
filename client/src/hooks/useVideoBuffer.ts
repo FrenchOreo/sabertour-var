@@ -1,4 +1,5 @@
 import { useRef, useCallback, useState } from 'react';
+import { getBitrate } from '../lib/qualitySettings';
 
 const BUFFER_DURATION_MS = 60_000;
 const CHUNK_INTERVAL_MS = 100;
@@ -79,6 +80,7 @@ export function useVideoBuffer() {
   const buffersRef = useRef<Map<number, VideoBuffer>>(new Map());
   const recordersRef = useRef<Map<number, MediaRecorder>>(new Map());
   const [bufferDurations, setBufferDurations] = useState<Map<number, number>>(new Map());
+  const [recorderStatus, setRecorderStatus] = useState<Map<number, 'recording' | 'error' | 'idle'>>(new Map());
 
   const startRecording = useCallback((slotId: number, stream: MediaStream) => {
     // Cleanup existing
@@ -109,7 +111,7 @@ export function useVideoBuffer() {
 
     const recorder = new MediaRecorder(stream, {
       mimeType,
-      videoBitsPerSecond: 2_500_000,
+      videoBitsPerSecond: getBitrate(),
     });
 
     recorder.ondataavailable = async (e) => {
@@ -126,8 +128,34 @@ export function useVideoBuffer() {
       }
     };
 
-    recorder.start(CHUNK_INTERVAL_MS);
+    recorder.onerror = (e: Event) => {
+      console.error(`[MediaRecorder] Error on slot ${slotId}:`, e);
+      setRecorderStatus((prev) => {
+        const next = new Map(prev);
+        next.set(slotId, 'error');
+        return next;
+      });
+      // Try to restart
+      try {
+        if (recorder.state !== 'inactive') recorder.stop();
+      } catch {}
+      // Restart recording after a brief delay
+      setTimeout(() => {
+        try { startRecording(slotId, stream); } catch {}
+      }, 1000);
+    };
+
+    try {
+      recorder.start(CHUNK_INTERVAL_MS);
+    } catch (e) {
+      console.error(`[MediaRecorder] Failed to start on slot ${slotId}:`, e);
+    }
     recordersRef.current.set(slotId, recorder);
+    setRecorderStatus((prev) => {
+      const next = new Map(prev);
+      next.set(slotId, 'recording');
+      return next;
+    });
   }, []);
 
   const stopRecording = useCallback((slotId: number) => {
@@ -136,11 +164,16 @@ export function useVideoBuffer() {
       recorder.stop();
     }
     recordersRef.current.delete(slotId);
+    setRecorderStatus((prev) => {
+      const next = new Map(prev);
+      next.set(slotId, 'idle');
+      return next;
+    });
   }, []);
 
   const getBuffer = useCallback((slotId: number): VideoBuffer | undefined => {
     return buffersRef.current.get(slotId);
   }, []);
 
-  return { startRecording, stopRecording, getBuffer, bufferDurations };
+  return { startRecording, stopRecording, getBuffer, bufferDurations, recorderStatus };
 }
