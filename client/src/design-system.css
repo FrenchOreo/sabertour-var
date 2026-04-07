@@ -161,6 +161,11 @@ html, body, #root {
   50% { opacity: 0.3; }
 }
 
+@keyframes rec-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
 /* Frame counter */
 .frame-counter {
   font-family: var(--font-mono);
