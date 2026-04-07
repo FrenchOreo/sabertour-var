@@ -257,13 +257,14 @@ export default function ArbitragePage() {
         setCurrentFrame(getFrameFromTime(time));
         setTotalFrames(varTotalFrames);
         setCurrentTimeDisplay(time);
-        if (!expandedSlot && varVideoRef.current) {
+        // Only sync grid videos when PAUSED — during play they run independently
+        if (!expandedSlot && !isPlaying && varVideoRef.current) {
           syncGridVideos(varVideoRef.current.currentTime);
         }
       }, 50);
       return () => clearInterval(frameUpdateRef.current);
     }
-  }, [varMode, expandedSlot, player, syncGridVideos, varTotalFrames, getFrameFromTime]);
+  }, [varMode, expandedSlot, player, isPlaying, syncGridVideos, varTotalFrames, getFrameFromTime]);
 
   // Keyboard shortcuts
   useEffect(() => {

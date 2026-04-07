@@ -22,10 +22,24 @@ export function useWebRTCCamera({ slotId, stream, send }: UseWebRTCCameraOptions
     const pc = new RTCPeerConnection(peerConfig);
     pcRef.current = pc;
 
-    // Add local tracks
+    // Add local tracks and boost encoding quality
     if (stream) {
       for (const track of stream.getTracks()) {
-        pc.addTrack(track, stream);
+        const sender = pc.addTrack(track, stream);
+        // Set high initial bitrate and prefer resolution over framerate
+        if (track.kind === 'video') {
+          try {
+            const params = sender.getParameters();
+            if (!params.encodings || params.encodings.length === 0) {
+              params.encodings = [{}];
+            }
+            params.encodings[0].maxBitrate = 4_000_000; // 4 Mbps
+            params.degradationPreference = 'maintain-resolution';
+            sender.setParameters(params);
+          } catch (e) {
+            console.warn('[WebRTC] Could not set sender parameters:', e);
+          }
+        }
       }
     }
 

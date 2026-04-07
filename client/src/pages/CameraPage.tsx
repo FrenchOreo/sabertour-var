@@ -9,8 +9,13 @@ type CameraStatus = 'init' | 'permission' | 'connecting' | 'live' | 'reconnectin
 async function getCameraStream(): Promise<MediaStream> {
   const res = getResolutionConstraints();
   const constraints = [
+    // Try exact resolution first (forces full quality from the start)
+    { video: { facingMode: 'environment', width: { exact: res.width.ideal }, height: { exact: res.height.ideal } }, audio: false },
+    // Fallback to ideal (browser picks closest match)
     { video: { facingMode: 'environment', ...res }, audio: false },
+    // Fallback to just facing mode
     { video: { facingMode: 'environment' }, audio: false },
+    // Last resort
     { video: true, audio: false },
   ];
 
