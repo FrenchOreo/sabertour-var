@@ -2,7 +2,7 @@ import { useRef, useCallback, useState } from 'react';
 import { getBitrate } from '../lib/qualitySettings';
 
 const BUFFER_DURATION_MS = 60_000;
-const CHUNK_INTERVAL_MS = 100;
+const CHUNK_INTERVAL_MS = 1000;
 
 interface TimedChunk {
   data: Uint8Array;

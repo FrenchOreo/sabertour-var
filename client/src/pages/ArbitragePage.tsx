@@ -27,6 +27,8 @@ export default function ArbitragePage() {
   const varVideoRef = useRef<HTMLVideoElement>(null);
   const frameUpdateRef = useRef<ReturnType<typeof setInterval>>();
   const gridVideoRefs = useRef<Map<SlotId, HTMLVideoElement>>(new Map());
+  const wasRecordingBeforeVar = useRef(false);
+  const recordingFolderBeforeVar = useRef<string | null>(null);
 
   const { startRecording: startBufferRecording, stopRecording: stopBufferRecording, getBuffer, bufferDurations } = useVideoBuffer();
   const { player, fps, init: initFramePlayer } = useFramePlayer(varVideoRef);
@@ -115,6 +117,9 @@ export default function ArbitragePage() {
     for (const slot of slots) {
       stopBufferRecording(slot.slotId);
     }
+    // Save recording state to auto-restart on exit
+    wasRecordingBeforeVar.current = recording.isRecording;
+    recordingFolderBeforeVar.current = recording.recordingFolder;
     if (recording.isRecording) {
       recording.stopAll();
     }
@@ -148,7 +153,19 @@ export default function ArbitragePage() {
         startBufferRecording(slot.slotId, stream);
       }
     }
-  }, [varBlobs, slots, streams, startBufferRecording]);
+
+    // Auto-restart file recording if it was active before VAR (new files)
+    if (wasRecordingBeforeVar.current && recordingFolderBeforeVar.current) {
+      const folder = recordingFolderBeforeVar.current;
+      for (const slot of slots) {
+        const stream = streams.get(slot.slotId);
+        if (slot.cameraConnected && stream) {
+          recording.startRecording(slot.slotId, slot.name, stream, folder);
+        }
+      }
+    }
+    wasRecordingBeforeVar.current = false;
+  }, [varBlobs, slots, streams, startBufferRecording, recording]);
 
   // Sync grid videos
   const syncGridVideos = useCallback((time: number) => {
@@ -366,7 +383,7 @@ export default function ArbitragePage() {
   const isVarGrid = varMode && !expandedSlot;
   const isVarExpanded = varMode && expandedSlot !== null;
 
-  // Shared VAR controls
+  // Shared VAR controls (includes REPRENDRE LE LIVE to avoid overlap with floating buttons)
   const renderVarControls = () => (
     <div style={{
       padding: '8px 12px',
@@ -377,6 +394,7 @@ export default function ArbitragePage() {
       alignItems: 'center',
       justifyContent: 'center',
       gap: 8,
+      flexShrink: 0,
     }}>
       <div className="flex items-center gap-2">
         <button className="btn" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => handleStepBackward(10)}>
@@ -412,6 +430,10 @@ export default function ArbitragePage() {
           </button>
         ))}
       </div>
+
+      <button className="btn-live" onClick={exitVarMode} style={{ padding: '8px 20px', fontSize: '0.85rem', marginLeft: 8 }}>
+        REPRENDRE LE LIVE
+      </button>
     </div>
   );
 
@@ -555,59 +577,49 @@ export default function ArbitragePage() {
         </div>
       )}
 
-      {/* ============ Floating overlay buttons ============ */}
-      <div style={{
-        position: 'fixed',
-        bottom: 16,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        zIndex: 50,
-        pointerEvents: 'none',
-      }}>
-        {/* REC button — only in live mode */}
-        {!varMode && recording.isElectron && (
-          <button
-            onClick={handleRecordToggle}
-            style={{
-              pointerEvents: 'auto',
-              display: 'flex', alignItems: 'center', gap: 6,
-              padding: '8px 16px',
-              border: recording.isRecording ? '2px solid #ff4444' : '2px solid var(--border)',
-              borderRadius: 24,
-              background: recording.isRecording ? 'rgba(255, 68, 68, 0.2)' : 'rgba(18, 18, 26, 0.9)',
-              color: recording.isRecording ? '#ff4444' : 'var(--text)',
-              cursor: 'pointer',
-              fontFamily: 'var(--font-ui)', fontWeight: 700, fontSize: '0.85rem',
-              textTransform: 'uppercase', letterSpacing: '0.05em',
-              backdropFilter: 'blur(8px)',
-            }}
-          >
-            <span style={{
-              display: 'inline-block', width: 10, height: 10, borderRadius: '50%',
-              background: recording.isRecording ? '#ff4444' : '#666',
-              animation: recording.isRecording ? 'rec-blink 1s ease-in-out infinite' : 'none',
-            }} />
-            {recording.isRecording ? 'STOP' : 'REC'}
-          </button>
-        )}
-
-        {/* VAR button — only in live mode */}
-        {!varMode && (
+      {/* ============ Floating overlay buttons (live mode only) ============ */}
+      {!varMode && (
+        <div style={{
+          position: 'fixed',
+          bottom: 16,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          zIndex: 50,
+          pointerEvents: 'none',
+        }}>
+          {recording.isElectron && (
+            <button
+              onClick={handleRecordToggle}
+              style={{
+                pointerEvents: 'auto',
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '8px 16px',
+                border: recording.isRecording ? '2px solid #ff4444' : '2px solid var(--border)',
+                borderRadius: 24,
+                background: recording.isRecording ? 'rgba(255, 68, 68, 0.2)' : 'rgba(18, 18, 26, 0.9)',
+                color: recording.isRecording ? '#ff4444' : 'var(--text)',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-ui)', fontWeight: 700, fontSize: '0.85rem',
+                textTransform: 'uppercase', letterSpacing: '0.05em',
+                backdropFilter: 'blur(8px)',
+              }}
+            >
+              <span style={{
+                display: 'inline-block', width: 10, height: 10, borderRadius: '50%',
+                background: recording.isRecording ? '#ff4444' : '#666',
+                animation: recording.isRecording ? 'rec-blink 1s ease-in-out infinite' : 'none',
+              }} />
+              {recording.isRecording ? 'STOP' : 'REC'}
+            </button>
+          )}
           <button className="btn-var" onClick={handleVarPress} style={{ pointerEvents: 'auto', padding: '14px 40px', fontSize: '1.4rem' }}>
             VAR
           </button>
-        )}
-
-        {/* REPRENDRE LE LIVE — only in VAR mode */}
-        {varMode && (
-          <button className="btn-live" onClick={exitVarMode} style={{ pointerEvents: 'auto', padding: '10px 24px', fontSize: '0.95rem' }}>
-            REPRENDRE LE LIVE
-          </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Error toast */}
       {varError && <div className="toast-error">{varError}</div>}
