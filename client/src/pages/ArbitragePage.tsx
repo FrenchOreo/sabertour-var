@@ -484,7 +484,7 @@ export default function ArbitragePage() {
 
       {/* ============ MODE 1: Live Grid ============ */}
       {isLiveGrid && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div
             style={{
               flex: 1,
@@ -529,13 +529,13 @@ export default function ArbitragePage() {
 
       {/* ============ MODE 2: Live Expanded ============ */}
       {isLiveExpanded && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div style={{ padding: '8px 16px' }}>
             <button className="btn" onClick={() => setExpandedSlot(null)}>
               {'\u2190'} 4 Caméras
             </button>
           </div>
-          <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
+          <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
             {(() => {
               const stream = expandedSlot !== null ? streams.get(expandedSlot) : null;
               const slotInfo = slots.find((s) => s.slotId === expandedSlot);
@@ -574,7 +574,7 @@ export default function ArbitragePage() {
 
       {/* ============ MODE 3: VAR Grid — 4 replays simultanés ============ */}
       {isVarGrid && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div
             style={{
               flex: 1,
@@ -631,7 +631,7 @@ export default function ArbitragePage() {
 
       {/* ============ MODE 4: VAR Expanded ============ */}
       {isVarExpanded && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#000' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#000', minHeight: 0 }}>
           <div style={{ padding: '8px 16px', display: 'flex', gap: 12, alignItems: 'center' }}>
             <button className="btn" onClick={() => {
               setExpandedSlot(null);
