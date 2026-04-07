@@ -23,6 +23,7 @@ export default function ArbitragePage() {
   const [currentTimeDisplay, setCurrentTimeDisplay] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [videoZoom, setVideoZoom] = useState(1);
+  const [varLoading, setVarLoading] = useState(false); // pre-buffering indicator
 
   const varVideoRef = useRef<HTMLVideoElement>(null);
   const frameUpdateRef = useRef<ReturnType<typeof setInterval>>();
@@ -186,28 +187,34 @@ export default function ArbitragePage() {
     return Math.min(frame, varTotalFrames);
   }, [fps, varTotalFrames]);
 
-  // === VAR expanded: load blob ===
+  // === VAR expanded: load blob, preserve current position ===
   useEffect(() => {
     if (!varMode || !expandedSlot) return;
     const blobUrl = varBlobs.get(expandedSlot);
     const video = varVideoRef.current;
     if (!blobUrl || !video) return;
 
+    // Save current position before switching source
+    const savedTime = currentTimeDisplay;
+
     video.src = blobUrl;
+    video.preload = 'auto';
     video.onloadeddata = async () => {
-      await initFramePlayer();
-      if (varVideoRef.current) {
+      const fp = await initFramePlayer();
+      if (fp && varVideoRef.current) {
         varVideoRef.current.pause();
-        // Seek to end using known duration
-        varVideoRef.current.currentTime = varDurationSec;
+        // Seek to saved position (or end if first entry)
+        const targetTime = savedTime > 0 ? Math.min(savedTime, varDurationSec) : varDurationSec;
+        varVideoRef.current.currentTime = targetTime;
         setTotalFrames(varTotalFrames);
-        setCurrentFrame(varTotalFrames);
-        setCurrentTimeDisplay(varDurationSec);
+        setCurrentFrame(getFrameFromTime(targetTime));
+        setCurrentTimeDisplay(targetTime);
       }
     };
   }, [varMode, expandedSlot, varBlobs, initFramePlayer, varDurationSec, varTotalFrames]);
+  // Note: currentTimeDisplay intentionally NOT in deps — we read it once at the time of effect
 
-  // === VAR grid: init reference video ===
+  // === VAR grid: init reference video + pre-buffer for fast seeking ===
   useEffect(() => {
     if (!varMode || expandedSlot) return;
     const video = varVideoRef.current;
@@ -217,16 +224,57 @@ export default function ArbitragePage() {
     if (!firstBlob) return;
 
     video.src = firstBlob;
+    video.preload = 'auto';
+    setVarLoading(true);
+
     video.onloadeddata = async () => {
-      await initFramePlayer();
-      if (varVideoRef.current) {
+      const fp = await initFramePlayer();
+      if (!fp || !varVideoRef.current) return;
+
+      // Pre-buffer: play at max speed silently to build browser seek index
+      varVideoRef.current.muted = true;
+      varVideoRef.current.playbackRate = 16;
+      varVideoRef.current.currentTime = 0;
+
+      const onEnded = () => {
+        if (!varVideoRef.current) return;
+        varVideoRef.current.removeEventListener('ended', onEnded);
+        varVideoRef.current.removeEventListener('pause', onEnded);
         varVideoRef.current.pause();
+        varVideoRef.current.playbackRate = 1;
+        // Seek to end after pre-buffer
         varVideoRef.current.currentTime = varDurationSec;
         setTotalFrames(varTotalFrames);
         setCurrentFrame(varTotalFrames);
         setCurrentTimeDisplay(varDurationSec);
         syncGridVideos(varDurationSec);
-      }
+        setVarLoading(false);
+      };
+
+      // If video is very short, it might end before we catch it
+      varVideoRef.current.addEventListener('ended', onEnded);
+      // Timeout fallback: if pre-buffer takes too long, abort after 3s
+      const timeout = setTimeout(() => {
+        if (varVideoRef.current && !varVideoRef.current.paused) {
+          onEnded();
+        }
+      }, 3000);
+
+      varVideoRef.current.play().catch(() => {
+        // play() rejected (e.g. no user gesture) — skip pre-buffer
+        clearTimeout(timeout);
+        if (varVideoRef.current) {
+          varVideoRef.current.playbackRate = 1;
+          varVideoRef.current.currentTime = varDurationSec;
+          setTotalFrames(varTotalFrames);
+          setCurrentFrame(varTotalFrames);
+          setCurrentTimeDisplay(varDurationSec);
+          syncGridVideos(varDurationSec);
+          setVarLoading(false);
+        }
+      });
+
+      return () => clearTimeout(timeout);
     };
   }, [varMode, expandedSlot, varBlobs, initFramePlayer, varDurationSec, varTotalFrames, syncGridVideos]);
 
@@ -543,7 +591,18 @@ export default function ArbitragePage() {
 
       {/* ============ MODE 3: VAR Grid ============ */}
       {isVarGrid && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', position: 'relative' }}>
+          {varLoading && (
+            <div style={{
+              position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'rgba(0,0,0,0.6)', zIndex: 10,
+              fontFamily: 'var(--font-ui)', color: 'var(--cyan)',
+              textTransform: 'uppercase', letterSpacing: '0.15em', fontSize: '1rem',
+            }}>
+              Chargement des replays...
+            </div>
+          )}
           <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gridTemplateRows: 'repeat(2, 1fr)', gap: 4, padding: 4, minHeight: 0 }}>
             {slots.map((slot) => {
               const blobUrl = varBlobs.get(slot.slotId);
