@@ -180,10 +180,11 @@ export default function ArbitragePage() {
   const varDurationSec = varDurationMs / 1000;
   const varTotalFrames = Math.round(varDurationSec * fps);
 
-  // Helper to compute frame from currentTime using known duration
+  // Helper to compute frame from currentTime, clamped to known total
   const getFrameFromTime = useCallback((time: number) => {
-    return Math.round(time * fps);
-  }, [fps]);
+    const frame = Math.round(time * fps);
+    return Math.min(frame, varTotalFrames);
+  }, [fps, varTotalFrames]);
 
   // === VAR expanded: load blob ===
   useEffect(() => {
@@ -232,8 +233,14 @@ export default function ArbitragePage() {
   const togglePlayPause = useCallback(() => {
     if (!player) return;
     if (player.paused) {
+      // Sync grid videos to reference time BEFORE playing
+      const refTime = varVideoRef.current?.currentTime || 0;
+      gridVideoRefs.current.forEach((v) => {
+        v.currentTime = refTime;
+        v.playbackRate = playbackRate;
+        v.play();
+      });
       player.play();
-      gridVideoRefs.current.forEach((v) => { v.playbackRate = playbackRate; v.play(); });
       setIsPlaying(true);
     } else {
       player.pause();
@@ -246,7 +253,7 @@ export default function ArbitragePage() {
   useEffect(() => {
     if (varMode && player) {
       frameUpdateRef.current = setInterval(() => {
-        const time = varVideoRef.current?.currentTime || 0;
+        const time = Math.min(varVideoRef.current?.currentTime || 0, varDurationSec);
         setCurrentFrame(getFrameFromTime(time));
         setTotalFrames(varTotalFrames);
         setCurrentTimeDisplay(time);
@@ -335,12 +342,16 @@ export default function ArbitragePage() {
   const handleStepForward = useCallback((frames: number) => {
     if (!player) return;
     player.stepForward(frames);
+    // Clamp to known duration
+    if (varVideoRef.current && varVideoRef.current.currentTime > varDurationSec) {
+      varVideoRef.current.currentTime = varDurationSec;
+    }
     gridVideoRefs.current.forEach((v) => v.pause());
     setIsPlaying(false);
     setTimeout(() => {
       if (varVideoRef.current) syncGridVideos(varVideoRef.current.currentTime);
     }, 30);
-  }, [player, syncGridVideos]);
+  }, [player, syncGridVideos, varDurationSec]);
 
   const handleStepBackward = useCallback((frames: number) => {
     if (!player) return;
