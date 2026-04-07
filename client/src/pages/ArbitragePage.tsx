@@ -50,6 +50,9 @@ export default function ArbitragePage() {
     [startRecording]
   );
 
+  // Store webrtc functions in refs so handleMessage always uses latest
+  const webrtcRef = useRef<ReturnType<typeof useWebRTCArbitre>>(null!);
+
   const handleMessage = useCallback(
     (msg: WsMessage) => {
       switch (msg.type) {
@@ -60,15 +63,15 @@ export default function ArbitragePage() {
           setSlots((prev) => prev.map((s) => (s.slotId === msg.slot.slotId ? msg.slot : s)));
           // Auto-connect if camera comes online
           if (msg.slot.cameraConnected && !msg.slot.arbitreConnected) {
-            webrtc.connectToSlot(msg.slot.slotId);
+            webrtcRef.current.connectToSlot(msg.slot.slotId);
           }
           break;
         case 'relay-offer':
-          webrtc.handleOffer(msg.slotId, msg.sdp);
+          webrtcRef.current.handleOffer(msg.slotId, msg.sdp);
           break;
         case 'relay-ice':
           if (msg.from === 'camera') {
-            webrtc.handleIceCandidate(msg.slotId, msg.candidate);
+            webrtcRef.current.handleIceCandidate(msg.slotId, msg.candidate);
           }
           break;
         case 'error':
@@ -81,6 +84,7 @@ export default function ArbitragePage() {
 
   const { send, connected } = useSignaling({ onMessage: handleMessage });
   const webrtc = useWebRTCArbitre({ send, onTrack });
+  webrtcRef.current = webrtc;
 
   // Join as arbitre
   useEffect(() => {

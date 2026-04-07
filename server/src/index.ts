@@ -57,7 +57,7 @@ function findFreePort(start: number): Promise<number> {
   });
 }
 
-// Get local IPs
+// Get local IPs sorted by priority
 function getLocalIPs(): string[] {
   const interfaces = os.networkInterfaces();
   const ips: string[] = [];
@@ -68,6 +68,18 @@ function getLocalIPs(): string[] {
       }
     }
   }
+  // Sort by priority: 192.168.x.x first, 10.x.x.x second, 172.16-31.x.x third, others last
+  const priority = (ip: string): number => {
+    if (ip.startsWith('192.168.')) return 0;
+    if (ip.startsWith('10.')) return 1;
+    const parts = ip.split('.');
+    if (parts[0] === '172') {
+      const second = parseInt(parts[1], 10);
+      if (second >= 16 && second <= 31) return 2;
+    }
+    return 3;
+  };
+  ips.sort((a, b) => priority(a) - priority(b));
   return ips;
 }
 

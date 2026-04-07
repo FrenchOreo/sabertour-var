@@ -41,6 +41,9 @@ export default function CameraPage() {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
+  // Store webrtc functions in refs so handleMessage always uses latest
+  const webrtcRef = useRef<ReturnType<typeof useWebRTCCamera>>(null!);
+
   const handleMessage = useCallback(
     (msg: WsMessage) => {
       switch (msg.type) {
@@ -54,17 +57,17 @@ export default function CameraPage() {
           break;
         case 'relay-connect-request':
           if (msg.slotId === slotId) {
-            webrtc.createOffer();
+            webrtcRef.current.createOffer();
           }
           break;
         case 'relay-answer':
           if (msg.slotId === slotId) {
-            webrtc.handleAnswer(msg.sdp);
+            webrtcRef.current.handleAnswer(msg.sdp);
           }
           break;
         case 'relay-ice':
           if (msg.slotId === slotId && msg.from === 'arbitre') {
-            webrtc.handleIceCandidate(msg.candidate);
+            webrtcRef.current.handleIceCandidate(msg.candidate);
           }
           break;
         case 'error':
@@ -79,6 +82,7 @@ export default function CameraPage() {
   const { send, connected } = useSignaling({ onMessage: handleMessage });
 
   const webrtc = useWebRTCCamera({ slotId, stream, send });
+  webrtcRef.current = webrtc;
 
   // Get camera and join
   useEffect(() => {

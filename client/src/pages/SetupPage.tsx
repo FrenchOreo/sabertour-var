@@ -46,7 +46,12 @@ export default function SetupPage() {
         if (data.ips && data.ips.length > 0) {
           setLanIps(data.ips);
           setLanPort(data.port);
-          setSelectedIp(data.ips[0]);
+          const storedIp = localStorage.getItem('saber-var-selected-ip');
+          if (storedIp && data.ips.includes(storedIp)) {
+            setSelectedIp(storedIp);
+          } else {
+            setSelectedIp(data.ips[0]);
+          }
         }
       })
       .catch(() => {
@@ -107,6 +112,9 @@ export default function SetupPage() {
           >
             SABER VAR
           </h1>
+          <a href="/settings" className="btn" style={{ textDecoration: 'none', fontSize: '0.85rem' }}>
+            Paramètres
+          </a>
           <a href="/guide" className="btn" style={{ textDecoration: 'none', fontSize: '0.85rem' }}>
             Guide
           </a>

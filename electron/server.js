@@ -27,6 +27,20 @@ function getLocalIPs() {
       }
     }
   }
+  // Sort by priority: 192.168.x.x first, 10.x.x.x second, 172.16-31.x.x third, others last
+  ips.sort((a, b) => {
+    const priority = (ip) => {
+      if (ip.startsWith('192.168.')) return 0;
+      if (ip.startsWith('10.')) return 1;
+      const parts = ip.split('.');
+      if (parts[0] === '172') {
+        const second = parseInt(parts[1], 10);
+        if (second >= 16 && second <= 31) return 2;
+      }
+      return 3;
+    };
+    return priority(a) - priority(b);
+  });
   return ips;
 }
 
