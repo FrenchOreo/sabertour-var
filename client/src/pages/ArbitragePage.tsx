@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCArbitre } from '../hooks/useWebRTC';
 import { useVideoBuffer } from '../hooks/useVideoBuffer';
-import { useFramePlayer } from '../hooks/useFramePlayer';
+import { useFramePlayer, FramePlayer } from '../hooks/useFramePlayer';
 import { useRecording } from '../hooks/useRecording';
 import CameraTile from '../components/CameraTile';
 import VarTimeline from '../components/VarTimeline';
@@ -22,8 +22,11 @@ export default function ArbitragePage() {
   const [currentTimeDisplay, setCurrentTimeDisplay] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
+  // Main video ref (used for expanded VAR view and as timing reference)
   const varVideoRef = useRef<HTMLVideoElement>(null);
   const frameUpdateRef = useRef<ReturnType<typeof setInterval>>();
+  // Refs for each grid VAR video (keyed by slotId)
+  const gridVideoRefs = useRef<Map<SlotId, HTMLVideoElement>>(new Map());
 
   const { startRecording, getBuffer, bufferDurations } = useVideoBuffer();
   const { player, fps, init: initFramePlayer } = useFramePlayer(varVideoRef);
@@ -50,7 +53,6 @@ export default function ArbitragePage() {
     [startRecording]
   );
 
-  // Store webrtc functions in refs so handleMessage always uses latest
   const webrtcRef = useRef<ReturnType<typeof useWebRTCArbitre>>(null!);
 
   const handleMessage = useCallback(
@@ -61,7 +63,6 @@ export default function ArbitragePage() {
           break;
         case 'slot-updated':
           setSlots((prev) => prev.map((s) => (s.slotId === msg.slot.slotId ? msg.slot : s)));
-          // Auto-connect if camera comes online
           if (msg.slot.cameraConnected && !msg.slot.arbitreConnected) {
             webrtcRef.current.connectToSlot(msg.slot.slotId);
           }
@@ -86,14 +87,12 @@ export default function ArbitragePage() {
   const webrtc = useWebRTCArbitre({ send, onTrack });
   webrtcRef.current = webrtc;
 
-  // Join as arbitre
   useEffect(() => {
     if (connected) {
       send({ type: 'arbitre-join' });
     }
   }, [connected, send]);
 
-  // Auto-connect to all available cameras
   useEffect(() => {
     for (const slot of slots) {
       if (slot.cameraConnected && !slot.arbitreConnected) {
@@ -102,7 +101,7 @@ export default function ArbitragePage() {
     }
   }, [slots]);
 
-  // VAR mode: single-click trigger
+  // === VAR trigger: single-click, captures all cameras ===
   const handleVarPress = useCallback(() => {
     let hasAnyData = false;
     const blobs = new Map<SlotId, string>();
@@ -119,21 +118,20 @@ export default function ArbitragePage() {
     }
 
     if (!hasAnyData) {
-      setVarError('Buffer vide \u2014 attendre 30s apr\u00e8s connexion des cam\u00e9ras');
+      setVarError('Buffer vide — attendre 30s après connexion des caméras');
       setTimeout(() => setVarError(null), 4000);
       return;
     }
 
     setVarBlobs(blobs);
     setVarMode(true);
-    setExpandedSlot(null); // start in grid view
+    setExpandedSlot(null);
   }, [slots, getBuffer]);
 
   const exitVarMode = useCallback(() => {
     setVarMode(false);
     setIsPlaying(false);
     setExpandedSlot(null);
-    // Cleanup blob URLs
     for (const url of varBlobs.values()) {
       URL.revokeObjectURL(url);
     }
@@ -145,13 +143,16 @@ export default function ArbitragePage() {
     clearInterval(frameUpdateRef.current);
   }, [varBlobs]);
 
-  const selectVarCamera = useCallback((slotId: SlotId) => {
-    const blobUrl = varBlobs.get(slotId);
-    if (!blobUrl) return;
-    setExpandedSlot(slotId);
-  }, [varBlobs]);
+  // Sync all grid videos to a target time
+  const syncGridVideos = useCallback((time: number) => {
+    gridVideoRefs.current.forEach((video) => {
+      if (Math.abs(video.currentTime - time) > 0.05) {
+        video.currentTime = time;
+      }
+    });
+  }, []);
 
-  // When VAR expanded slot changes, load the blob into the video element (runs after mount)
+  // === VAR expanded: load blob into main video ===
   useEffect(() => {
     if (!varMode || !expandedSlot) return;
     const blobUrl = varBlobs.get(expandedSlot);
@@ -171,51 +172,90 @@ export default function ArbitragePage() {
     };
   }, [varMode, expandedSlot, varBlobs, initFramePlayer]);
 
+  // === VAR grid: init first blob into hidden video for timing reference ===
+  useEffect(() => {
+    if (!varMode || expandedSlot) return;
+    const video = varVideoRef.current;
+    if (!video) return;
+
+    // Use the first available blob as reference
+    const firstBlob = varBlobs.values().next().value;
+    if (!firstBlob) return;
+
+    video.src = firstBlob;
+    video.onloadeddata = async () => {
+      const fp = await initFramePlayer();
+      if (fp && varVideoRef.current) {
+        varVideoRef.current.pause();
+        varVideoRef.current.currentTime = varVideoRef.current.duration;
+        setTotalFrames(fp.getTotalFrames());
+        setCurrentFrame(fp.getTotalFrames());
+        setCurrentTimeDisplay(varVideoRef.current.duration);
+        // Sync grid videos to end too
+        syncGridVideos(varVideoRef.current.duration);
+      }
+    };
+  }, [varMode, expandedSlot, varBlobs, initFramePlayer, syncGridVideos]);
+
   const togglePlayPause = useCallback(() => {
     if (!player) return;
     if (player.paused) {
       player.play();
+      // Also play all grid videos
+      gridVideoRefs.current.forEach((v) => {
+        v.playbackRate = playbackRate;
+        v.play();
+      });
       setIsPlaying(true);
     } else {
       player.pause();
+      gridVideoRefs.current.forEach((v) => v.pause());
       setIsPlaying(false);
     }
-  }, [player]);
+  }, [player, playbackRate]);
 
-  // Update frame counter periodically in VAR mode
+  // Update frame counter + sync grid videos periodically
   useEffect(() => {
-    if (varMode && expandedSlot && player) {
+    if (varMode && player) {
       frameUpdateRef.current = setInterval(() => {
         setCurrentFrame(player.getCurrentFrameNumber());
         setTotalFrames(player.getTotalFrames());
         setCurrentTimeDisplay(player.currentTime);
+        // Sync grid videos to reference
+        if (!expandedSlot && varVideoRef.current) {
+          syncGridVideos(varVideoRef.current.currentTime);
+        }
       }, 50);
       return () => clearInterval(frameUpdateRef.current);
     }
-  }, [varMode, expandedSlot, player]);
+  }, [varMode, expandedSlot, player, syncGridVideos]);
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts (work in both VAR grid and VAR expanded)
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if (!varMode || !expandedSlot || !player) return;
+      if (!varMode || !player) return;
       switch (e.key) {
         case 'ArrowRight':
           player.stepForward(1);
+          if (varVideoRef.current) syncGridVideos(varVideoRef.current.currentTime);
           setIsPlaying(false);
           e.preventDefault();
           break;
         case 'ArrowLeft':
           player.stepBackward(1);
+          if (varVideoRef.current) syncGridVideos(varVideoRef.current.currentTime);
           setIsPlaying(false);
           e.preventDefault();
           break;
         case 'ArrowUp':
           player.stepForward(10);
+          if (varVideoRef.current) syncGridVideos(varVideoRef.current.currentTime);
           setIsPlaying(false);
           e.preventDefault();
           break;
         case 'ArrowDown':
           player.stepBackward(10);
+          if (varVideoRef.current) syncGridVideos(varVideoRef.current.currentTime);
           setIsPlaying(false);
           e.preventDefault();
           break;
@@ -226,42 +266,46 @@ export default function ArbitragePage() {
         case '1':
           player.setPlaybackRate(1);
           setPlaybackRate(1);
+          gridVideoRefs.current.forEach((v) => { v.playbackRate = 1; });
           break;
         case '2':
           player.setPlaybackRate(0.5);
           setPlaybackRate(0.5);
+          gridVideoRefs.current.forEach((v) => { v.playbackRate = 0.5; });
           break;
         case '3':
           player.setPlaybackRate(0.25);
           setPlaybackRate(0.25);
+          gridVideoRefs.current.forEach((v) => { v.playbackRate = 0.25; });
           break;
         case '4':
           player.setPlaybackRate(0.1);
           setPlaybackRate(0.1);
+          gridVideoRefs.current.forEach((v) => { v.playbackRate = 0.1; });
           break;
         case 'Escape':
           if (expandedSlot) {
-            // If expanded in VAR, go back to VAR grid
             setExpandedSlot(null);
-            if (varVideoRef.current) {
-              varVideoRef.current.pause();
-            }
+            if (varVideoRef.current) varVideoRef.current.pause();
             setIsPlaying(false);
+          } else {
+            exitVarMode();
           }
           break;
       }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [varMode, expandedSlot, player, togglePlayPause]);
+  }, [varMode, expandedSlot, player, togglePlayPause, exitVarMode, syncGridVideos]);
 
   const handleSeek = useCallback(
     (timeMs: number) => {
       if (varVideoRef.current) {
         varVideoRef.current.currentTime = timeMs / 1000;
+        syncGridVideos(timeMs / 1000);
       }
     },
-    []
+    [syncGridVideos]
   );
 
   const handleSpeedChange = useCallback(
@@ -269,25 +313,44 @@ export default function ArbitragePage() {
       if (player) {
         player.setPlaybackRate(rate);
         setPlaybackRate(rate);
+        gridVideoRefs.current.forEach((v) => { v.playbackRate = rate; });
       }
     },
     [player]
   );
 
-  // Recording: start all connected streams
+  const handleStepForward = useCallback((frames: number) => {
+    if (!player) return;
+    player.stepForward(frames);
+    gridVideoRefs.current.forEach((v) => v.pause());
+    setIsPlaying(false);
+    // Sync after a tick to let the reference video update
+    setTimeout(() => {
+      if (varVideoRef.current) syncGridVideos(varVideoRef.current.currentTime);
+    }, 30);
+  }, [player, syncGridVideos]);
+
+  const handleStepBackward = useCallback((frames: number) => {
+    if (!player) return;
+    player.stepBackward(frames);
+    gridVideoRefs.current.forEach((v) => v.pause());
+    setIsPlaying(false);
+    setTimeout(() => {
+      if (varVideoRef.current) syncGridVideos(varVideoRef.current.currentTime);
+    }, 30);
+  }, [player, syncGridVideos]);
+
+  // Recording toggle
   const handleRecordToggle = useCallback(async () => {
     if (recording.isRecording) {
       recording.stopAll();
       return;
     }
-
     let folder = recording.recordingFolder;
     if (!folder) {
       folder = await recording.selectFolder();
-      if (!folder) return; // user cancelled
+      if (!folder) return;
     }
-
-    // Start recording all connected camera streams
     for (const slot of slots) {
       const stream = streams.get(slot.slotId);
       if (slot.cameraConnected && stream) {
@@ -298,14 +361,87 @@ export default function ArbitragePage() {
 
   const expandedSlotInfo = slots.find((s) => s.slotId === expandedSlot);
 
-  // Determine current mode
   const isLiveGrid = !varMode && !expandedSlot;
   const isLiveExpanded = !varMode && expandedSlot !== null;
   const isVarGrid = varMode && !expandedSlot;
   const isVarExpanded = varMode && expandedSlot !== null;
 
+  // Shared VAR controls (used in both grid and expanded)
+  const renderVarControls = () => (
+    <div
+      style={{
+        padding: '12px 16px',
+        background: 'var(--bg-surface)',
+        borderTop: '1px solid var(--border)',
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 12,
+      }}
+    >
+      {/* Frame controls */}
+      <div className="flex items-center gap-2">
+        <button className="btn" onClick={() => handleStepBackward(10)}>
+          {'\u25C0\u25C0'} -10f
+        </button>
+        <button className="btn" onClick={() => handleStepBackward(1)}>
+          {'\u25C0'} -1f
+        </button>
+        <button className="btn" onClick={togglePlayPause} style={{ minWidth: 60 }}>
+          {isPlaying ? '\u23F8' : '\u25B6'}
+        </button>
+        <button className="btn" onClick={() => handleStepForward(1)}>
+          +1f {'\u25B6'}
+        </button>
+        <button className="btn" onClick={() => handleStepForward(10)}>
+          +10f {'\u25B6\u25B6'}
+        </button>
+      </div>
+
+      {/* Frame info */}
+      <div className="font-mono text-cyan" style={{ fontSize: '0.9rem' }}>
+        FRAME : {currentFrame} / {totalFrames}
+      </div>
+
+      {/* Speed controls */}
+      <div className="flex items-center gap-2">
+        <span className="text-muted" style={{ fontSize: '0.8rem', textTransform: 'uppercase' }}>
+          Vitesse :
+        </span>
+        {[0.1, 0.25, 0.5, 1].map((rate) => (
+          <button
+            key={rate}
+            className={`speed-btn ${playbackRate === rate ? 'active' : ''}`}
+            onClick={() => handleSpeedChange(rate)}
+          >
+            {rate}x
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  // Shared timeline (used in both grid and expanded)
+  const renderTimeline = () => (
+    <div style={{ padding: '8px 16px' }}>
+      <VarTimeline
+        durationMs={(varVideoRef.current?.duration || 0) * 1000}
+        currentTimeMs={currentTimeDisplay * 1000}
+        bufferDurationMs={(varVideoRef.current?.duration || 0) * 1000}
+        fps={fps}
+        onSeek={handleSeek}
+      />
+    </div>
+  );
+
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Hidden reference video for VAR grid mode (invisible when expanded — the expanded view uses it directly) */}
+      {isVarGrid && (
+        <video ref={varVideoRef} style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }} playsInline muted />
+      )}
+
       {/* Header */}
       <div
         className={varMode ? 'var-header' : ''}
@@ -331,17 +467,17 @@ export default function ArbitragePage() {
           {varMode ? 'MODE VAR' : 'SABER VAR'}
         </span>
         <span className="text-muted" style={{ fontSize: '0.85rem', flex: 1 }}>
-          {connected ? '\u25cf Connect\u00e9' : '\u25cb D\u00e9connect\u00e9'}
+          {connected ? '\u25CF Connecté' : '\u25CB Déconnecté'}
         </span>
         <a href="/setup" className="btn" style={{ textDecoration: 'none', fontSize: '0.75rem', padding: '6px 12px' }}>
           Setup
         </a>
         <a href="/settings" className="btn" style={{ textDecoration: 'none', fontSize: '0.75rem', padding: '6px 12px' }}>
-          Param\u00e8tres
+          Paramètres
         </a>
         {isVarExpanded && expandedSlotInfo && (
           <span style={{ fontFamily: 'var(--font-ui)', fontWeight: 600, color: 'var(--text)', textTransform: 'uppercase' }}>
-            CAM\u00c9RA: {expandedSlotInfo.name}
+            Caméra: {expandedSlotInfo.name}
           </span>
         )}
       </div>
@@ -394,14 +530,11 @@ export default function ArbitragePage() {
       {/* ============ MODE 2: Live Expanded ============ */}
       {isLiveExpanded && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-          {/* Back to grid button */}
           <div style={{ padding: '8px 16px' }}>
             <button className="btn" onClick={() => setExpandedSlot(null)}>
-              \u2190 4 Cam\u00e9ras
+              {'\u2190'} 4 Caméras
             </button>
           </div>
-
-          {/* Full-screen video of expanded camera */}
           <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
             {(() => {
               const stream = expandedSlot !== null ? streams.get(expandedSlot) : null;
@@ -439,7 +572,7 @@ export default function ArbitragePage() {
         </div>
       )}
 
-      {/* ============ MODE 3: VAR Grid ============ */}
+      {/* ============ MODE 3: VAR Grid — 4 replays simultanés ============ */}
       {isVarGrid && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
           <div
@@ -452,74 +585,69 @@ export default function ArbitragePage() {
             }}
           >
             {slots.map((slot) => {
-              const hasBlob = varBlobs.has(slot.slotId);
+              const blobUrl = varBlobs.get(slot.slotId);
               return (
                 <div
                   key={slot.slotId}
-                  className={`camera-tile ${hasBlob ? 'var-available' : 'offline'}`}
-                  onClick={() => hasBlob && selectVarCamera(slot.slotId)}
-                  style={{ cursor: hasBlob ? 'pointer' : 'default' }}
+                  className={`camera-tile ${blobUrl ? 'var-available' : 'offline'}`}
+                  onClick={() => blobUrl && setExpandedSlot(slot.slotId)}
+                  style={{ cursor: blobUrl ? 'pointer' : 'default' }}
                 >
-                  <div style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 8,
-                    fontFamily: 'var(--font-ui)',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.1em',
-                  }}>
-                    <span style={{
-                      color: hasBlob ? 'var(--red)' : 'var(--text-dim)',
-                      fontWeight: 700,
-                      fontSize: '1.1rem',
+                  {blobUrl ? (
+                    <VarGridVideo
+                      blobUrl={blobUrl}
+                      registerRef={(el) => {
+                        if (el) gridVideoRefs.current.set(slot.slotId, el);
+                        else gridVideoRefs.current.delete(slot.slotId);
+                      }}
+                    />
+                  ) : (
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontFamily: 'var(--font-ui)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.1em',
+                      color: 'var(--text-dim)',
+                      fontSize: '0.9rem',
                     }}>
-                      CAM\u00c9RA {slot.name}
-                    </span>
-                    {hasBlob && (
-                      <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-                        Cliquer pour agrandir
-                      </span>
-                    )}
-                    {!hasBlob && (
-                      <span style={{ color: 'var(--text-dim)', fontSize: '0.8rem' }}>
-                        Pas de donn\u00e9es
-                      </span>
-                    )}
+                      Pas de données
+                    </div>
+                  )}
+                  <div className="label" style={{ color: blobUrl ? 'var(--red)' : undefined }}>
+                    {slot.name}
                   </div>
-                  <div className="label">{slot.name}</div>
                 </div>
               );
             })}
           </div>
+
+          {/* Timeline + controls shared across all 4 cameras */}
+          {renderTimeline()}
+          {renderVarControls()}
         </div>
       )}
 
       {/* ============ MODE 4: VAR Expanded ============ */}
       {isVarExpanded && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#000' }}>
-          {/* Back to VAR grid button */}
           <div style={{ padding: '8px 16px', display: 'flex', gap: 12, alignItems: 'center' }}>
             <button className="btn" onClick={() => {
               setExpandedSlot(null);
-              if (varVideoRef.current) {
-                varVideoRef.current.pause();
-              }
+              if (varVideoRef.current) varVideoRef.current.pause();
               setIsPlaying(false);
             }}>
-              \u2190 Autres cam\u00e9ras
+              {'\u2190'} Autres caméras
             </button>
           </div>
 
-          {/* Video area */}
           <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <video
               ref={varVideoRef}
-              style={{ maxWidth: '100%', maxHeight: '100%', background: '#000' }}
+              style={{ maxWidth: '100%', maxHeight: '100%', background: '#000', display: 'block' }}
               playsInline
             />
-            {/* Frame counter overlay */}
             <div style={{ position: 'absolute', top: 12, right: 12 }}>
               <FrameCounter
                 currentFrame={currentFrame}
@@ -529,74 +657,8 @@ export default function ArbitragePage() {
             </div>
           </div>
 
-          {/* Timeline */}
-          <div style={{ padding: '8px 16px' }}>
-            <VarTimeline
-              durationMs={(varVideoRef.current?.duration || 0) * 1000}
-              currentTimeMs={currentTimeDisplay * 1000}
-              bufferDurationMs={(varVideoRef.current?.duration || 0) * 1000}
-              fps={fps}
-              onSeek={handleSeek}
-            />
-          </div>
-
-          {/* Controls */}
-          <div
-            style={{
-              padding: '12px 16px 16px',
-              background: 'var(--bg-surface)',
-              borderTop: '1px solid var(--border)',
-              display: 'flex',
-              flexWrap: 'wrap',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 12,
-            }}
-          >
-            {/* Frame controls */}
-            <div className="flex items-center gap-2">
-              <button className="btn" onClick={() => player?.stepBackward(10)}>
-                \u25c0\u25c0 -10f
-              </button>
-              <button className="btn" onClick={() => player?.stepBackward(1)}>
-                \u25c0 -1f
-              </button>
-              <button
-                className="btn"
-                onClick={togglePlayPause}
-                style={{ minWidth: 60 }}
-              >
-                {isPlaying ? '\u23f8' : '\u25b6'}
-              </button>
-              <button className="btn" onClick={() => player?.stepForward(1)}>
-                +1f \u25b6
-              </button>
-              <button className="btn" onClick={() => player?.stepForward(10)}>
-                +10f \u25b6\u25b6
-              </button>
-            </div>
-
-            {/* Frame info */}
-            <div className="font-mono text-cyan" style={{ fontSize: '0.9rem' }}>
-              FRAME : {currentFrame} / {totalFrames}
-            </div>
-
-            {/* Speed controls */}
-            <div className="flex items-center gap-2">
-              <span className="text-muted" style={{ fontSize: '0.8rem', textTransform: 'uppercase' }}>
-                Vitesse :
-              </span>
-              {[0.1, 0.25, 0.5, 1].map((rate) => (
-                <button
-                  key={rate}
-                  className={`speed-btn ${playbackRate === rate ? 'active' : ''}`}
-                  onClick={() => handleSpeedChange(rate)}
-                >
-                  {rate}x
-                </button>
-              ))}
-            </div>
-          </div>
+          {renderTimeline()}
+          {renderVarControls()}
         </div>
       )}
 
@@ -660,10 +722,7 @@ export default function ArbitragePage() {
               const seconds = String(elapsed % 60).padStart(2, '0');
               const sizeMB = Math.round(totalBytes / (1024 * 1024));
               return (
-                <span
-                  className="font-mono"
-                  style={{ fontSize: '0.8rem', color: '#ff4444' }}
-                >
+                <span className="font-mono" style={{ fontSize: '0.8rem', color: '#ff4444' }}>
                   {hours}:{minutes}:{seconds} | {totalFiles} fichier{totalFiles !== 1 ? 's' : ''} | {sizeMB} MB
                 </span>
               );
@@ -676,7 +735,7 @@ export default function ArbitragePage() {
           </div>
         )}
 
-        {/* Buffer info — compact display for all cameras */}
+        {/* Buffer info */}
         {!varMode && (
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             {slots.filter((s) => s.cameraConnected).map((slot) => (
@@ -687,14 +746,23 @@ export default function ArbitragePage() {
           </div>
         )}
 
-        {/* VAR button — only in live mode */}
+        {/* VAR button */}
         {!varMode && (
           <button className="btn-var" onClick={handleVarPress}>
             VAR
           </button>
         )}
 
-        {/* REPRENDRE LE LIVE button — only in VAR mode */}
+        {/* Frame counter in bottom bar during VAR grid */}
+        {isVarGrid && (
+          <FrameCounter
+            currentFrame={currentFrame}
+            totalFrames={totalFrames}
+            currentTime={currentTimeDisplay}
+          />
+        )}
+
+        {/* REPRENDRE LE LIVE */}
         {varMode && (
           <button className="btn-live" onClick={exitVarMode}>
             REPRENDRE LE LIVE
@@ -712,7 +780,7 @@ export default function ArbitragePage() {
   );
 }
 
-/** Helper component: renders a live video stream in the expanded view */
+/** Live expanded video */
 function LiveExpandedVideo({ stream }: { stream: MediaStream }) {
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -729,6 +797,29 @@ function LiveExpandedVideo({ stream }: { stream: MediaStream }) {
       muted
       playsInline
       style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+    />
+  );
+}
+
+/** VAR grid video tile — plays a blob URL */
+function VarGridVideo({ blobUrl, registerRef }: { blobUrl: string; registerRef: (el: HTMLVideoElement | null) => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    registerRef(el);
+    el.src = blobUrl;
+    el.currentTime = 9999; // seek to end
+    return () => registerRef(null);
+  }, [blobUrl, registerRef]);
+
+  return (
+    <video
+      ref={videoRef}
+      muted
+      playsInline
+      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
     />
   );
 }
