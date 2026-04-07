@@ -1,0 +1,50 @@
+{
+  "name": "saber-var",
+  "version": "1.0.0",
+  "description": "Système VAR pour Saber Tour — Vidéo arbitrage sabre laser",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:client": "cd client && npm install && npm run build",
+    "build:app": "npm run build:client && electron-builder",
+    "build:app:mac": "npm run build:client && electron-builder --mac",
+    "build:app:win": "npm run build:client && electron-builder --win"
+  },
+  "build": {
+    "appId": "com.sabertour.var",
+    "productName": "SABER VAR",
+    "files": [
+      "electron/**/*",
+      "client/dist/**/*",
+      "shared/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": null
+    },
+    "win": {
+      "target": "nsis",
+      "icon": null
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "nsis": {
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false
+    }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "electron": "^41.1.1",
+    "electron-builder": "^26.8.1",
+    "express": "^5.2.1",
+    "selfsigned": "^2.4.1",
+    "ws": "^8.20.0"
+  }
+}

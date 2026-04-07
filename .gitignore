@@ -3,3 +3,4 @@ dist/
 .certs/
 *.pem
 .env
+release/
