@@ -100,12 +100,12 @@ html, body, #root {
   background: #000;
   border: 1px solid var(--border);
   position: relative;
-  aspect-ratio: 16/9;
   overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 0;
 }
 .camera-tile.connected {
   border-color: var(--cyan-border);

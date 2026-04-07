@@ -484,14 +484,16 @@ export default function ArbitragePage() {
 
       {/* ============ MODE 1: Live Grid ============ */}
       {isLiveGrid && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
           <div
             style={{
               flex: 1,
               display: 'grid',
               gridTemplateColumns: 'repeat(2, 1fr)',
+              gridTemplateRows: 'repeat(2, 1fr)',
               gap: 4,
               padding: 4,
+              minHeight: 0,
             }}
           >
             {slots.map((slot) => (
@@ -574,14 +576,16 @@ export default function ArbitragePage() {
 
       {/* ============ MODE 3: VAR Grid — 4 replays simultanés ============ */}
       {isVarGrid && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
           <div
             style={{
               flex: 1,
               display: 'grid',
               gridTemplateColumns: 'repeat(2, 1fr)',
+              gridTemplateRows: 'repeat(2, 1fr)',
               gap: 4,
               padding: 4,
+              minHeight: 0,
             }}
           >
             {slots.map((slot) => {
