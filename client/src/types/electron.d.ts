@@ -8,6 +8,7 @@ export interface ElectronAPI {
     fileName?: string;
   }) => Promise<{ path: string; size: number }>;
   getRecordingFolder: () => Promise<string | null>;
+  readRecordingFile: (filePath: string) => Promise<{ data: Uint8Array; size: number } | null>;
 }
 
 declare global {

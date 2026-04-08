@@ -227,20 +227,36 @@ export function useRecording() {
     const paths = new Map<SlotId, string>();
     const entries = Array.from(recordingsRef.current.entries());
 
+    const savePromises: Promise<void>[] = [];
+
     for (const [slotId, state] of entries) {
       // Remove from map so onstop doesn't restart
       recordingsRef.current.delete(slotId);
+
       if (state.recorder.state !== 'inactive') {
-        // Stop triggers onstop which saves chunks
-        state.recorder.stop();
-      }
-      // Wait a bit for the save to complete
-      await new Promise((r) => setTimeout(r, 200));
-      if (state.lastFilePath) {
-        paths.set(slotId as SlotId, state.lastFilePath);
+        // Create a promise that resolves when onstop has finished saving
+        const p = new Promise<void>((resolve) => {
+          const origOnStop = state.recorder.onstop;
+          state.recorder.onstop = async (ev) => {
+            if (origOnStop) await (origOnStop as any).call(state.recorder, ev);
+            resolve();
+          };
+          state.recorder.stop();
+        });
+        savePromises.push(p);
       }
 
       setStatuses((prev) => { const next = new Map(prev); next.delete(slotId); return next; });
+    }
+
+    // Wait for ALL saves to complete
+    await Promise.all(savePromises);
+
+    // Collect paths
+    for (const [slotId, state] of entries) {
+      if (state.lastFilePath) {
+        paths.set(slotId as SlotId, state.lastFilePath);
+      }
     }
 
     setIsRecording(false);

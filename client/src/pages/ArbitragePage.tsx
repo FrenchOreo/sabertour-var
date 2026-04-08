@@ -128,11 +128,19 @@ export default function ArbitragePage() {
     const urls = new Map<SlotId, string>();
     let maxDurationMs = 0;
 
-    if (recording.isRecording && recording.isElectron) {
-      // Flush current recording to disk and get file paths
+    if (recording.isRecording && recording.isElectron && window.electronAPI) {
+      // Flush recording to disk, then read files back as blobs with proper WebM headers
       const filePaths = await recording.flushAndGetPaths();
       for (const [slotId, filePath] of filePaths) {
-        urls.set(slotId, `file://${filePath}`);
+        try {
+          const result = await window.electronAPI.readRecordingFile(filePath);
+          if (result) {
+            const blob = new Blob([new Uint8Array(result.data)], { type: 'video/webm' });
+            urls.set(slotId, URL.createObjectURL(blob));
+          }
+        } catch (e) {
+          console.error(`[VAR] Failed to read file for slot ${slotId}:`, e);
+        }
       }
     } else if (recording.isRecording) {
       recording.stopAll();
@@ -188,9 +196,7 @@ export default function ArbitragePage() {
     setIsPlaying(false);
     setExpandedSlot(null);
     setVideoZoom(1);
-    for (const url of varBlobs.values()) {
-      if (url.startsWith('blob:')) URL.revokeObjectURL(url);
-    }
+    for (const url of varBlobs.values()) URL.revokeObjectURL(url);
     setVarBlobs(new Map());
     varVideoRefs.current.clear();
     clearInterval(frameUpdateRef.current);

@@ -32,6 +32,16 @@ ipcMain.handle('get-recording-folder', () => {
   return lastRecordingFolder;
 });
 
+ipcMain.handle('read-recording-file', async (_event, filePath) => {
+  try {
+    const buffer = await fs.promises.readFile(filePath);
+    return { data: buffer, size: buffer.length };
+  } catch (err) {
+    console.error('[read-recording-file] Error:', err.message);
+    return null;
+  }
+});
+
 async function createWindow() {
   // Start the embedded server first
   try {
