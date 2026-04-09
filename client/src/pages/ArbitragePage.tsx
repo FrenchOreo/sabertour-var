@@ -178,7 +178,53 @@ export default function ArbitragePage() {
     wasRecordingBeforeVar.current = false;
   }, [varBlobs, slots, streams, startBufferRecording, recording]);
 
-  // ============ Frame stepping — uses varTimeRef as source of truth ============
+  // ============ Frame stepping — play/pause per frame for reliable rendering ============
+
+  // Step forward N frames: play briefly, wait for frame render, pause
+  const stepForward = useCallback(async (frames: number) => {
+    pauseAll();
+    for (let i = 0; i < frames; i++) {
+      const promises: Promise<void>[] = [];
+      varVideoRefs.current.forEach((v) => {
+        const el = v as HTMLVideoElement;
+        const p = new Promise<void>((resolve) => {
+          const hasRVFC = typeof (el as any).requestVideoFrameCallback === 'function';
+          if (hasRVFC) {
+            (el as any).requestVideoFrameCallback(() => {
+              el.pause();
+              resolve();
+            });
+          } else {
+            setTimeout(() => { el.pause(); resolve(); }, 50);
+          }
+          el.playbackRate = 1;
+          el.play().catch(() => resolve());
+        });
+        promises.push(p);
+      });
+      await Promise.all(promises);
+    }
+    // Update ref from actual video position
+    const video = getActiveVideo();
+    if (video) {
+      varTimeRef.current = video.currentTime;
+      setCurrentTimeDisplay(video.currentTime);
+      setCurrentFrame(Math.round(video.currentTime * fps));
+    }
+  }, [pauseAll, getActiveVideo, fps]);
+
+  // Step backward N frames: seek then step forward from a keyframe
+  // WebM can't seek precisely backward, so we seek back further and let the browser decode
+  const stepBackward = useCallback((frames: number) => {
+    pauseAll();
+    const target = Math.max(0, varTimeRef.current - frameInterval * frames);
+    varTimeRef.current = target;
+    setAllVarTime(target);
+    setCurrentTimeDisplay(target);
+    setCurrentFrame(Math.round(target * fps));
+  }, [pauseAll, frameInterval, setAllVarTime, fps]);
+
+  // Seek via timeline click
   const seekTo = useCallback((time: number) => {
     const clamped = Math.max(0, Math.min(time, varDurationSec));
     varTimeRef.current = clamped;
@@ -186,16 +232,6 @@ export default function ArbitragePage() {
     setCurrentTimeDisplay(clamped);
     setCurrentFrame(Math.min(Math.round(clamped * fps), varTotalFrames));
   }, [varDurationSec, setAllVarTime, fps, varTotalFrames]);
-
-  const stepForward = useCallback((frames: number) => {
-    pauseAll();
-    seekTo(varTimeRef.current + frameInterval * frames);
-  }, [frameInterval, seekTo, pauseAll]);
-
-  const stepBackward = useCallback((frames: number) => {
-    pauseAll();
-    seekTo(varTimeRef.current - frameInterval * frames);
-  }, [frameInterval, seekTo, pauseAll]);
 
   const togglePlayPause = useCallback(() => {
     if (isPlaying) {
