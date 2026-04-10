@@ -29,8 +29,12 @@ export default function ArbitragePage() {
   // Persistent VAR video refs — one per camera, never unmounted during VAR
   const varVideoRefs = useRef<Map<SlotId, HTMLVideoElement>>(new Map());
   const frameUpdateRef = useRef<ReturnType<typeof setInterval>>();
-  // Track time in JS (not from video.currentTime which is async/unreliable on WebM)
+  // Track time in JS (source of truth, not video.currentTime which is async on WebM)
   const varTimeRef = useRef(0);
+  // Deterministic frame counter — incremented/decremented by step functions, not derived from currentTime
+  const frameCounterRef = useRef(0);
+  // Per-camera time offsets for synchronization (seconds)
+  const [varOffsets, setVarOffsets] = useState<Map<SlotId, number>>(new Map());
   const wasRecordingBeforeVar = useRef(false);
   const recordingFolderBeforeVar = useRef<string | null>(null);
 
@@ -53,11 +57,20 @@ export default function ArbitragePage() {
     return null;
   }, [expandedSlot]);
 
-  // Set time on ALL var videos
-  const setAllVarTime = useCallback((time: number) => {
-    varVideoRefs.current.forEach((v) => {
-      v.currentTime = time;
+  // Set time on ALL var videos with per-camera offset for sync
+  const seekAllTo = useCallback((time: number) => {
+    varVideoRefs.current.forEach((v, slotId) => {
+      const offset = varOffsets.get(slotId) || 0;
+      v.currentTime = time + offset;
     });
+  }, [varOffsets]);
+
+  // Get the "master" video (first one) and its slot for RVFC-based stepping
+  const getMasterEntry = useCallback((): [SlotId, HTMLVideoElement] | null => {
+    for (const [slotId, el] of varVideoRefs.current) {
+      if (el.src) return [slotId, el];
+    }
+    return null;
   }, []);
 
   const playAll = useCallback(() => {
@@ -117,8 +130,9 @@ export default function ArbitragePage() {
     recordingFolderBeforeVar.current = recording.recordingFolder;
     if (recording.isRecording) recording.stopAll();
 
-    // Build blobs from buffer
+    // Build blobs + compute sync offsets
     const urls = new Map<SlotId, string>();
+    const startTimes = new Map<SlotId, number>();
     let maxDurationMs = 0;
 
     for (const slot of slots) {
@@ -128,6 +142,8 @@ export default function ArbitragePage() {
         if (blob) urls.set(slot.slotId, URL.createObjectURL(blob));
         const dur = buffer.getReplayDurationMs();
         if (dur > maxDurationMs) maxDurationMs = dur;
+        const firstTs = buffer.getFirstChunkTimestamp();
+        if (firstTs > 0) startTimes.set(slot.slotId, firstTs);
       }
     }
 
@@ -141,14 +157,24 @@ export default function ArbitragePage() {
       return;
     }
 
+    // Compute per-camera offsets: align all cameras to the one that started earliest
+    const offsets = new Map<SlotId, number>();
+    if (startTimes.size > 1) {
+      const minStart = Math.min(...startTimes.values());
+      for (const [id, t] of startTimes) {
+        offsets.set(id, (t - minStart) / 1000); // offset in seconds
+      }
+    }
+
+    setVarOffsets(offsets);
     setVarDurationMs(maxDurationMs);
     setVarBlobs(urls);
     setVarMode(true);
     setExpandedSlot(null);
     setVideoZoom(1);
     setPlaybackRate(1);
-    // Start at beginning — video loads at 0 naturally
     varTimeRef.current = 0;
+    frameCounterRef.current = 0;
     setCurrentTimeDisplay(0);
     setCurrentFrame(0);
     setTotalFrames(Math.round((maxDurationMs / 1000) * FPS_DEFAULT));
@@ -178,86 +204,103 @@ export default function ArbitragePage() {
     wasRecordingBeforeVar.current = false;
   }, [varBlobs, slots, streams, startBufferRecording, recording]);
 
-  // ============ Frame stepping ============
+  // ============ Frame stepping — deterministic counter + camera sync ============
 
-  // Step forward: play + RVFC + pause = advance exactly 1 rendered frame
+  // Helper: update display from frameCounterRef
+  const updateDisplay = useCallback(() => {
+    const t = frameCounterRef.current * frameInterval;
+    setCurrentFrame(frameCounterRef.current);
+    setCurrentTimeDisplay(t);
+  }, [frameInterval]);
+
+  // Step forward N frames: RVFC on master video, then sync others
   const stepForward = useCallback(async (frames: number) => {
-    // DON'T call pauseAll() — it triggers re-render which was causing the bug
-    // Just pause videos directly without state update
     varVideoRefs.current.forEach((v) => v.pause());
+
+    const master = getMasterEntry();
+    if (!master) return;
+    const [masterSlotId, masterEl] = master;
 
     for (let i = 0; i < frames; i++) {
-      const promises: Promise<void>[] = [];
-      varVideoRefs.current.forEach((v) => {
-        const el = v as HTMLVideoElement;
-        const p = new Promise<void>((resolve) => {
-          const hasRVFC = typeof (el as any).requestVideoFrameCallback === 'function';
-          if (hasRVFC) {
-            (el as any).requestVideoFrameCallback(() => {
-              el.pause();
-              resolve();
-            });
-          } else {
-            // Fallback: small timeout
-            setTimeout(() => { el.pause(); resolve(); }, 60);
-          }
-          el.playbackRate = 1;
-          el.play().catch(() => resolve());
-        });
-        promises.push(p);
+      // Advance master via RVFC (one real decoded frame)
+      await new Promise<void>((resolve) => {
+        const hasRVFC = typeof (masterEl as any).requestVideoFrameCallback === 'function';
+        if (hasRVFC) {
+          (masterEl as any).requestVideoFrameCallback(() => {
+            masterEl.pause();
+            resolve();
+          });
+        } else {
+          setTimeout(() => { masterEl.pause(); resolve(); }, 60);
+        }
+        masterEl.playbackRate = 1;
+        masterEl.play().catch(() => resolve());
       });
-      await Promise.all(promises);
+      frameCounterRef.current += 1;
     }
-    // Read actual position from video
-    setIsPlaying(false);
-    const video = getActiveVideo();
-    if (video) {
-      varTimeRef.current = video.currentTime;
-      setCurrentTimeDisplay(video.currentTime);
-      setCurrentFrame(Math.round(video.currentTime * fps));
-    }
-  }, [getActiveVideo, fps]);
 
-  // Step backward: use currentTime seek (may jump to nearest keyframe — WebM limitation)
+    // Read master's actual time and sync other cameras
+    const masterTime = masterEl.currentTime;
+    const masterOffset = varOffsets.get(masterSlotId) || 0;
+    const realTime = masterTime - masterOffset; // wall-clock time
+    varTimeRef.current = realTime;
+
+    // Sync other videos to the same wall-clock time
+    varVideoRefs.current.forEach((v, slotId) => {
+      if (slotId === masterSlotId) return;
+      const offset = varOffsets.get(slotId) || 0;
+      v.currentTime = realTime + offset;
+    });
+
+    setIsPlaying(false);
+    updateDisplay();
+  }, [getMasterEntry, varOffsets, updateDisplay]);
+
+  // Step backward N frames: decrement counter, seek all videos
   const stepBackward = useCallback((frames: number) => {
     varVideoRefs.current.forEach((v) => v.pause());
-    setIsPlaying(false);
-    const target = Math.max(0, varTimeRef.current - frameInterval * frames);
+    frameCounterRef.current = Math.max(0, frameCounterRef.current - frames);
+    const target = frameCounterRef.current * frameInterval;
     varTimeRef.current = target;
-    varVideoRefs.current.forEach((v) => { v.currentTime = target; });
-    setCurrentTimeDisplay(target);
-    setCurrentFrame(Math.round(target * fps));
-  }, [frameInterval, fps]);
+    seekAllTo(target);
+    setIsPlaying(false);
+    updateDisplay();
+  }, [frameInterval, seekAllTo, updateDisplay]);
 
   // Seek via timeline click
   const seekTo = useCallback((time: number) => {
     const clamped = Math.max(0, Math.min(time, varDurationSec));
     varTimeRef.current = clamped;
-    varVideoRefs.current.forEach((v) => { v.currentTime = clamped; });
-    setCurrentTimeDisplay(clamped);
-    setCurrentFrame(Math.min(Math.round(clamped * fps), varTotalFrames));
-  }, [varDurationSec, fps, varTotalFrames]);
+    frameCounterRef.current = Math.round(clamped * fps);
+    seekAllTo(clamped);
+    updateDisplay();
+  }, [varDurationSec, fps, seekAllTo, updateDisplay]);
 
   const togglePlayPause = useCallback(() => {
     if (isPlaying) {
-      // Pause all directly (avoid pauseAll to minimize re-renders)
       varVideoRefs.current.forEach((v) => v.pause());
       setIsPlaying(false);
-      const video = getActiveVideo();
-      if (video) {
-        varTimeRef.current = video.currentTime;
-        setCurrentTimeDisplay(video.currentTime);
-        setCurrentFrame(Math.round(video.currentTime * fps));
+      // Recalibrate from master video
+      const master = getMasterEntry();
+      if (master) {
+        const [masterSlotId, masterEl] = master;
+        const masterOffset = varOffsets.get(masterSlotId) || 0;
+        const realTime = masterEl.currentTime - masterOffset;
+        varTimeRef.current = realTime;
+        frameCounterRef.current = Math.round(realTime * fps);
+        updateDisplay();
       }
     } else {
-      varVideoRefs.current.forEach((v) => {
-        v.currentTime = varTimeRef.current;
+      // Sync all videos to current time with offsets, then play
+      varVideoRefs.current.forEach((v, slotId) => {
+        const offset = varOffsets.get(slotId) || 0;
+        v.currentTime = varTimeRef.current + offset;
         v.playbackRate = playbackRate;
         v.play().catch(() => {});
       });
       setIsPlaying(true);
     }
-  }, [isPlaying, getActiveVideo, playbackRate, fps]);
+  }, [isPlaying, getMasterEntry, varOffsets, playbackRate, fps, updateDisplay]);
 
   const handleSeek = useCallback((timeMs: number) => {
     seekTo(timeMs / 1000);
@@ -268,36 +311,21 @@ export default function ArbitragePage() {
     varVideoRefs.current.forEach((v) => { v.playbackRate = rate; });
   }, []);
 
-  // Update frame counter — during play, read from video; during pause, varTimeRef is truth
-  // Also detect real duration from file-based videos (finite duration)
+  // Update frame counter during play — recalibrate from master video
   useEffect(() => {
     if (!varMode) return;
     frameUpdateRef.current = setInterval(() => {
-      const video = getActiveVideo();
-      if (!video) return;
-
-      // If video has a real duration (file-based), use it for more accuracy
-      if (isFinite(video.duration) && video.duration > 0) {
-        const realDur = video.duration;
-        const realTotalFrames = Math.round(realDur * fps);
-        if (isPlaying) {
-          const time = video.currentTime;
-          varTimeRef.current = time;
-          setCurrentFrame(Math.round(time * fps));
-          setTotalFrames(realTotalFrames);
-          setCurrentTimeDisplay(time);
-          // Update known duration if file gives us a better one
-          if (Math.abs(realDur - varDurationSec) > 1) {
-            setVarDurationMs(realDur * 1000);
-          }
-        }
-      } else if (isPlaying) {
-        const time = Math.min(video.currentTime, varDurationSec);
-        varTimeRef.current = time;
-        setCurrentFrame(Math.min(Math.round(time * fps), varTotalFrames));
-        setTotalFrames(varTotalFrames);
-        setCurrentTimeDisplay(time);
-      }
+      if (!isPlaying) return;
+      const master = getMasterEntry();
+      if (!master) return;
+      const [masterSlotId, masterEl] = master;
+      const masterOffset = varOffsets.get(masterSlotId) || 0;
+      const realTime = masterEl.currentTime - masterOffset;
+      varTimeRef.current = realTime;
+      frameCounterRef.current = Math.round(realTime * fps);
+      setCurrentFrame(frameCounterRef.current);
+      setTotalFrames(varTotalFrames);
+      setCurrentTimeDisplay(realTime);
     }, 50);
     return () => clearInterval(frameUpdateRef.current);
   }, [varMode, isPlaying, getActiveVideo, varDurationSec, varTotalFrames, fps]);

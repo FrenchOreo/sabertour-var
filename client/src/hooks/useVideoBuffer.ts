@@ -81,6 +81,12 @@ export class VideoBuffer {
   hasData(): boolean {
     return this.initSegment !== null && this.chunks.length > 1;
   }
+
+  /** Timestamp of the first data chunk (used to align multiple cameras) */
+  getFirstChunkTimestamp(): number {
+    const first = this.chunks.find((c) => !c.isInit);
+    return first ? first.timestampMs : 0;
+  }
 }
 
 export function useVideoBuffer() {
