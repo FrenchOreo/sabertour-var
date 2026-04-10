@@ -178,11 +178,14 @@ export default function ArbitragePage() {
     wasRecordingBeforeVar.current = false;
   }, [varBlobs, slots, streams, startBufferRecording, recording]);
 
-  // ============ Frame stepping — play/pause per frame for reliable rendering ============
+  // ============ Frame stepping ============
 
-  // Step forward N frames: play briefly, wait for frame render, pause
+  // Step forward: play + RVFC + pause = advance exactly 1 rendered frame
   const stepForward = useCallback(async (frames: number) => {
-    pauseAll();
+    // DON'T call pauseAll() — it triggers re-render which was causing the bug
+    // Just pause videos directly without state update
+    varVideoRefs.current.forEach((v) => v.pause());
+
     for (let i = 0; i < frames; i++) {
       const promises: Promise<void>[] = [];
       varVideoRefs.current.forEach((v) => {
@@ -195,7 +198,8 @@ export default function ArbitragePage() {
               resolve();
             });
           } else {
-            setTimeout(() => { el.pause(); resolve(); }, 50);
+            // Fallback: small timeout
+            setTimeout(() => { el.pause(); resolve(); }, 60);
           }
           el.playbackRate = 1;
           el.play().catch(() => resolve());
@@ -204,39 +208,41 @@ export default function ArbitragePage() {
       });
       await Promise.all(promises);
     }
-    // Update ref from actual video position
+    // Read actual position from video
+    setIsPlaying(false);
     const video = getActiveVideo();
     if (video) {
       varTimeRef.current = video.currentTime;
       setCurrentTimeDisplay(video.currentTime);
       setCurrentFrame(Math.round(video.currentTime * fps));
     }
-  }, [pauseAll, getActiveVideo, fps]);
+  }, [getActiveVideo, fps]);
 
-  // Step backward N frames: seek then step forward from a keyframe
-  // WebM can't seek precisely backward, so we seek back further and let the browser decode
+  // Step backward: use currentTime seek (may jump to nearest keyframe — WebM limitation)
   const stepBackward = useCallback((frames: number) => {
-    pauseAll();
+    varVideoRefs.current.forEach((v) => v.pause());
+    setIsPlaying(false);
     const target = Math.max(0, varTimeRef.current - frameInterval * frames);
     varTimeRef.current = target;
-    setAllVarTime(target);
+    varVideoRefs.current.forEach((v) => { v.currentTime = target; });
     setCurrentTimeDisplay(target);
     setCurrentFrame(Math.round(target * fps));
-  }, [pauseAll, frameInterval, setAllVarTime, fps]);
+  }, [frameInterval, fps]);
 
   // Seek via timeline click
   const seekTo = useCallback((time: number) => {
     const clamped = Math.max(0, Math.min(time, varDurationSec));
     varTimeRef.current = clamped;
-    setAllVarTime(clamped);
+    varVideoRefs.current.forEach((v) => { v.currentTime = clamped; });
     setCurrentTimeDisplay(clamped);
     setCurrentFrame(Math.min(Math.round(clamped * fps), varTotalFrames));
-  }, [varDurationSec, setAllVarTime, fps, varTotalFrames]);
+  }, [varDurationSec, fps, varTotalFrames]);
 
   const togglePlayPause = useCallback(() => {
     if (isPlaying) {
-      pauseAll();
-      // Read actual position from video
+      // Pause all directly (avoid pauseAll to minimize re-renders)
+      varVideoRefs.current.forEach((v) => v.pause());
+      setIsPlaying(false);
       const video = getActiveVideo();
       if (video) {
         varTimeRef.current = video.currentTime;
@@ -244,7 +250,6 @@ export default function ArbitragePage() {
         setCurrentFrame(Math.round(video.currentTime * fps));
       }
     } else {
-      // Set all videos to current ref time, then play
       varVideoRefs.current.forEach((v) => {
         v.currentTime = varTimeRef.current;
         v.playbackRate = playbackRate;
@@ -252,7 +257,7 @@ export default function ArbitragePage() {
       });
       setIsPlaying(true);
     }
-  }, [isPlaying, pauseAll, getActiveVideo, playbackRate, fps]);
+  }, [isPlaying, getActiveVideo, playbackRate, fps]);
 
   const handleSeek = useCallback((timeMs: number) => {
     seekTo(timeMs / 1000);
@@ -560,17 +565,23 @@ function PersistentVarVideo({ slotId, blobUrl, registerRef, zoom }: {
   zoom: number;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const initialized = useRef(false);
+  const srcSet = useRef(false);
 
+  // Set src ONCE on mount — never re-set regardless of parent re-renders
   useEffect(() => {
     const el = videoRef.current;
-    if (!el || initialized.current) return;
-    initialized.current = true;
+    if (!el || srcSet.current) return;
+    srcSet.current = true;
     registerRef(el);
     el.src = blobUrl;
     el.preload = 'auto';
-    return () => { registerRef(null); initialized.current = false; };
-  }, [blobUrl, registerRef]);
+    // Cleanup only on unmount
+    return () => {
+      registerRef(null);
+      srcSet.current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Empty deps: only runs on mount/unmount
 
   return (
     <video
