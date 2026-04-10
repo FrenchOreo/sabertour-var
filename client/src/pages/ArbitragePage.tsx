@@ -213,44 +213,43 @@ export default function ArbitragePage() {
     setCurrentTimeDisplay(t);
   }, [frameInterval]);
 
-  // Step forward N frames: RVFC on master video, then sync others
+  // Step forward N frames: RVFC on ALL cameras in parallel
   const stepForward = useCallback(async (frames: number) => {
     varVideoRefs.current.forEach((v) => v.pause());
 
     const master = getMasterEntry();
     if (!master) return;
-    const [masterSlotId, masterEl] = master;
+    const [masterSlotId] = master;
 
     for (let i = 0; i < frames; i++) {
-      // Advance master via RVFC (one real decoded frame)
-      await new Promise<void>((resolve) => {
-        const hasRVFC = typeof (masterEl as any).requestVideoFrameCallback === 'function';
-        if (hasRVFC) {
-          (masterEl as any).requestVideoFrameCallback(() => {
-            masterEl.pause();
-            resolve();
-          });
-        } else {
-          setTimeout(() => { masterEl.pause(); resolve(); }, 60);
-        }
-        masterEl.playbackRate = 1;
-        masterEl.play().catch(() => resolve());
+      // Advance ALL cameras via RVFC in parallel (each advances one real decoded frame)
+      const promises: Promise<void>[] = [];
+      varVideoRefs.current.forEach((el) => {
+        const p = new Promise<void>((resolve) => {
+          const hasRVFC = typeof (el as any).requestVideoFrameCallback === 'function';
+          if (hasRVFC) {
+            (el as any).requestVideoFrameCallback(() => {
+              el.pause();
+              resolve();
+            });
+          } else {
+            setTimeout(() => { el.pause(); resolve(); }, 60);
+          }
+          el.playbackRate = 1;
+          el.play().catch(() => resolve());
+        });
+        promises.push(p);
       });
+      await Promise.all(promises);
       frameCounterRef.current += 1;
     }
 
-    // Read master's actual time and sync other cameras
-    const masterTime = masterEl.currentTime;
-    const masterOffset = varOffsets.get(masterSlotId) || 0;
-    const realTime = masterTime - masterOffset; // wall-clock time
-    varTimeRef.current = realTime;
-
-    // Sync other videos to the same wall-clock time
-    varVideoRefs.current.forEach((v, slotId) => {
-      if (slotId === masterSlotId) return;
-      const offset = varOffsets.get(slotId) || 0;
-      v.currentTime = realTime + offset;
-    });
+    // Read master's actual time for the counter
+    const masterEl = varVideoRefs.current.get(masterSlotId);
+    if (masterEl) {
+      const masterOffset = varOffsets.get(masterSlotId) || 0;
+      varTimeRef.current = masterEl.currentTime - masterOffset;
+    }
 
     setIsPlaying(false);
     updateDisplay();
