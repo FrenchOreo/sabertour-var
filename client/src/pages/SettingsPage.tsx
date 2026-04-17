@@ -4,6 +4,7 @@ import {
   getResolution, setResolution, RESOLUTION_OPTIONS,
   getBitrateLevel, setBitrateLevel, BITRATE_OPTIONS,
   getRecordingFormat, setRecordingFormat, FORMAT_OPTIONS,
+  getBufferDurationSec, setBufferDurationSec, BUFFER_DURATION_OPTIONS,
   Resolution, BitrateLevel, RecordingFormat,
 } from '../lib/qualitySettings';
 
@@ -21,6 +22,7 @@ export default function SettingsPage() {
   const [resolution, setResolutionState] = useState<Resolution>(getResolution);
   const [bitrateLevel, setBitrateLevelState] = useState<BitrateLevel>(getBitrateLevel);
   const [recordingFormat, setRecordingFormatState] = useState<RecordingFormat>(getRecordingFormat);
+  const [bufferDuration, setBufferDurationState] = useState<number>(getBufferDurationSec);
   const [qualitySaved, setQualitySaved] = useState(false);
 
   // Fetch network info on mount
@@ -428,7 +430,35 @@ export default function SettingsPage() {
               ))}
             </select>
             <p className="text-muted" style={{ fontSize: '0.75rem', marginTop: 4 }}>
-              MP4 (H.264) peut ne pas être supporté sur tous les navigateurs.
+              MP4 par défaut. Le navigateur choisira un format supporté si MP4 n'est pas disponible.
+            </p>
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label
+              className="text-muted"
+              style={{
+                display: 'block',
+                fontSize: '0.85rem',
+                marginBottom: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              Durée du buffer VAR :
+            </label>
+            <select
+              className="input"
+              value={bufferDuration}
+              onChange={(e) => setBufferDurationState(parseInt(e.target.value, 10))}
+              style={{ maxWidth: 300 }}
+            >
+              {BUFFER_DURATION_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <p className="text-muted" style={{ fontSize: '0.75rem', marginTop: 4 }}>
+              Durée maximale du replay VAR. Plus la durée est longue, plus la mémoire utilisée est grande.
             </p>
           </div>
 
@@ -439,6 +469,7 @@ export default function SettingsPage() {
                 setResolution(resolution);
                 setBitrateLevel(bitrateLevel);
                 setRecordingFormat(recordingFormat);
+                setBufferDurationSec(bufferDuration);
                 setQualitySaved(true);
                 setTimeout(() => setQualitySaved(false), 2000);
               }}

@@ -43,9 +43,10 @@ ipcMain.handle('read-recording-file', async (_event, filePath) => {
 });
 
 async function createWindow() {
-  // Start the embedded server first
+  // Start the embedded server first with persistent token storage
+  const persistPath = path.join(app.getPath('userData'), 'slots.json');
   try {
-    serverInfo = await startServer();
+    serverInfo = await startServer({ persistPath });
   } catch (err) {
     dialog.showErrorBox('Erreur SABER VAR', `Impossible de démarrer le serveur:\n${err.message}`);
     app.quit();

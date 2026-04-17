@@ -49,7 +49,7 @@ export function getBitrate(): number {
 export function getRecordingFormat(): RecordingFormat {
   const stored = localStorage.getItem(FORMAT_KEY);
   if (stored === 'webm' || stored === 'mp4') return stored;
-  return 'webm';
+  return 'mp4';
 }
 
 export function setRecordingFormat(fmt: RecordingFormat): void {
@@ -58,16 +58,11 @@ export function setRecordingFormat(fmt: RecordingFormat): void {
 
 export function getRecordingMimeType(): string {
   const fmt = getRecordingFormat();
-  if (fmt === 'mp4') {
-    // Try mp4 codecs in order of preference
-    const mp4Types = ['video/mp4; codecs=avc1', 'video/mp4'];
-    for (const mt of mp4Types) {
-      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mt)) return mt;
-    }
-  }
-  // Default: webm
-  const webmTypes = ['video/webm; codecs=vp8', 'video/webm'];
-  for (const mt of webmTypes) {
+  // Try preferred format first, then fallback to whatever is supported
+  const types = fmt === 'mp4'
+    ? ['video/mp4; codecs=avc1', 'video/mp4', 'video/webm; codecs=vp8', 'video/webm']
+    : ['video/webm; codecs=vp8', 'video/webm', 'video/mp4; codecs=avc1', 'video/mp4'];
+  for (const mt of types) {
     if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mt)) return mt;
   }
   return 'video/webm';
@@ -89,6 +84,28 @@ export const BITRATE_OPTIONS: { value: BitrateLevel; label: string }[] = [
 ];
 
 export const FORMAT_OPTIONS: { value: RecordingFormat; label: string }[] = [
-  { value: 'webm', label: 'WebM (VP8)' },
-  { value: 'mp4', label: 'MP4 (H.264)' },
+  { value: 'mp4', label: 'MP4 (H.264) — recommandé' },
+  { value: 'webm', label: 'WebM (VP8) — fallback' },
+];
+
+// ============ Buffer duration (VAR replay window) ============
+const BUFFER_DURATION_KEY = 'saber-var-buffer-duration-sec';
+
+export function getBufferDurationSec(): number {
+  const stored = localStorage.getItem(BUFFER_DURATION_KEY);
+  const n = stored ? parseInt(stored, 10) : NaN;
+  if (!isNaN(n) && n >= 15 && n <= 600) return n;
+  return 60;
+}
+
+export function setBufferDurationSec(sec: number): void {
+  localStorage.setItem(BUFFER_DURATION_KEY, String(sec));
+}
+
+export const BUFFER_DURATION_OPTIONS: { value: number; label: string }[] = [
+  { value: 30, label: '30 secondes' },
+  { value: 60, label: '1 minute' },
+  { value: 120, label: '2 minutes' },
+  { value: 180, label: '3 minutes' },
+  { value: 300, label: '5 minutes' },
 ];

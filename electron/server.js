@@ -149,11 +149,13 @@ function setupSignaling(server, registry) {
   });
 }
 
-async function startServer() {
+async function startServer(options = {}) {
   const appExpress = express();
   appExpress.use(express.json());
 
-  const registry = new CameraRegistry();
+  // Persist tokens to disk so URLs survive server restarts
+  const persistPath = options.persistPath || path.join(process.cwd(), '.saber-var', 'slots.json');
+  const registry = new CameraRegistry(persistPath);
 
   // API routes
   appExpress.post('/api/setup', (req, res) => {

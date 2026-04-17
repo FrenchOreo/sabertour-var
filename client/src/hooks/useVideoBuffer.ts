@@ -1,7 +1,6 @@
 import { useRef, useCallback, useState } from 'react';
-import { getBitrate } from '../lib/qualitySettings';
+import { getBitrate, getRecordingMimeType, getBufferDurationSec } from '../lib/qualitySettings';
 
-const BUFFER_DURATION_MS = 60_000;
 const CHUNK_INTERVAL_MS = 1000;
 
 interface TimedChunk {
@@ -13,6 +12,11 @@ interface TimedChunk {
 export class VideoBuffer {
   private initSegment: Uint8Array | null = null;
   private chunks: TimedChunk[] = [];
+  private mimeType: string = 'video/webm; codecs=vp8';
+
+  setMimeType(mt: string): void {
+    this.mimeType = mt;
+  }
 
   addChunk(data: ArrayBuffer, isFirst: boolean): void {
     const chunk = new Uint8Array(data);
@@ -32,7 +36,7 @@ export class VideoBuffer {
   }
 
   private purgeOldChunks(): void {
-    const cutoff = Date.now() - BUFFER_DURATION_MS;
+    const cutoff = Date.now() - (getBufferDurationSec() * 1000);
     this.chunks = this.chunks.filter(
       (c) => c.isInit || c.timestampMs > cutoff
     );
@@ -51,7 +55,7 @@ export class VideoBuffer {
     if (replayChunks.length === 0) return null;
 
     const parts: BlobPart[] = [this.initSegment as BlobPart, ...replayChunks.map((c) => c.data as BlobPart)];
-    return new Blob(parts, { type: 'video/webm; codecs=vp8' });
+    return new Blob(parts, { type: this.mimeType });
   }
 
   getFullReplayBlob(): Blob | null {
@@ -61,7 +65,7 @@ export class VideoBuffer {
     if (dataChunks.length === 0) return null;
 
     const parts: BlobPart[] = [this.initSegment as BlobPart, ...dataChunks.map((c) => c.data as BlobPart)];
-    return new Blob(parts, { type: 'video/webm; codecs=vp8' });
+    return new Blob(parts, { type: this.mimeType });
   }
 
   /** Known duration from chunk timestamps (reliable, unlike video.duration which is Infinity for WebM) */
@@ -103,24 +107,13 @@ export function useVideoBuffer() {
     buffersRef.current.set(slotId, buffer);
     let isFirstChunk = true;
 
-    // Pick supported mime type
-    const mimeTypes = [
-      'video/webm; codecs=vp8',
-      'video/webm',
-      'video/mp4',
-    ];
-    let mimeType = '';
-    for (const mt of mimeTypes) {
-      if (MediaRecorder.isTypeSupported(mt)) {
-        mimeType = mt;
-        break;
-      }
-    }
-
+    // Use format from quality settings, with fallback to whatever is supported
+    const mimeType = getRecordingMimeType();
     if (!mimeType) {
       console.error('No supported MediaRecorder mimeType found');
       return;
     }
+    buffer.setMimeType(mimeType);
 
     const recorder = new MediaRecorder(stream, {
       mimeType,
@@ -184,9 +177,25 @@ export function useVideoBuffer() {
     });
   }, []);
 
+  const pauseAllRecording = useCallback(() => {
+    recordersRef.current.forEach((recorder) => {
+      if (recorder.state === 'recording') {
+        try { recorder.pause(); } catch {}
+      }
+    });
+  }, []);
+
+  const resumeAllRecording = useCallback(() => {
+    recordersRef.current.forEach((recorder) => {
+      if (recorder.state === 'paused') {
+        try { recorder.resume(); } catch {}
+      }
+    });
+  }, []);
+
   const getBuffer = useCallback((slotId: number): VideoBuffer | undefined => {
     return buffersRef.current.get(slotId);
   }, []);
 
-  return { startRecording, stopRecording, getBuffer, bufferDurations, recorderStatus };
+  return { startRecording, stopRecording, pauseAllRecording, resumeAllRecording, getBuffer, bufferDurations, recorderStatus };
 }

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCCamera } from '../hooks/useWebRTC';
 import { SlotId, WsMessage } from 'shared/types';
-import { getResolutionConstraints } from '../lib/qualitySettings';
+import { getResolutionConstraints, getResolution, setResolution, RESOLUTION_OPTIONS, Resolution } from '../lib/qualitySettings';
 
 type CameraStatus = 'init' | 'permission' | 'connecting' | 'live' | 'reconnecting' | 'error';
 
@@ -129,8 +129,9 @@ export default function CameraPage() {
   const handleFlip = async () => {
     const newMode = facingMode === 'environment' ? 'user' : 'environment';
     try {
+      const res = getResolutionConstraints();
       const s = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: newMode },
+        video: { facingMode: newMode, ...res },
         audio: false,
       });
       stream?.getTracks().forEach((t) => t.stop());
@@ -139,6 +140,21 @@ export default function CameraPage() {
       if (videoRef.current) {
         videoRef.current.srcObject = s;
       }
+    } catch {}
+  };
+
+  // Change resolution
+  const [resolution, setResolutionState] = useState<Resolution>(getResolution);
+  const [showSettings, setShowSettings] = useState(false);
+  const handleResolutionChange = async (newRes: Resolution) => {
+    setResolution(newRes);
+    setResolutionState(newRes);
+    // Restart stream with new resolution
+    try {
+      const s = await getCameraStream();
+      stream?.getTracks().forEach((t) => t.stop());
+      setStream(s);
+      if (videoRef.current) videoRef.current.srcObject = s;
     } catch {}
   };
 
@@ -238,15 +254,52 @@ export default function CameraPage() {
           </div>
         )}
 
-        {/* Flip button */}
+        {/* Buttons */}
         {stream && (
-          <button
-            className="btn"
-            onClick={handleFlip}
-            style={{ marginTop: 24, fontSize: '0.85rem' }}
-          >
-            ↕ Retourner
-          </button>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 24, flexWrap: 'wrap' }}>
+            <button
+              className="btn"
+              onClick={handleFlip}
+              style={{ fontSize: '0.85rem' }}
+            >
+              ↕ Retourner
+            </button>
+            <button
+              className="btn"
+              onClick={() => setShowSettings((s) => !s)}
+              style={{ fontSize: '0.85rem' }}
+            >
+              ⚙ Réglages
+            </button>
+          </div>
+        )}
+
+        {/* Settings panel */}
+        {stream && showSettings && (
+          <div style={{ marginTop: 16, padding: 16, background: '#000000aa', border: '1px solid var(--cyan-border)', borderRadius: 4, maxWidth: 320, margin: '16px auto 0' }}>
+            <label
+              style={{
+                display: 'block',
+                fontSize: '0.8rem',
+                marginBottom: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+                color: 'var(--text-muted)',
+              }}
+            >
+              Résolution :
+            </label>
+            <select
+              className="input"
+              value={resolution}
+              onChange={(e) => handleResolutionChange(e.target.value as Resolution)}
+              style={{ width: '100%' }}
+            >
+              {RESOLUTION_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
         )}
       </div>
     </div>

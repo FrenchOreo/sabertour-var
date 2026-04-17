@@ -38,8 +38,20 @@ export default function ArbitragePage() {
   const wasRecordingBeforeVar = useRef(false);
   const recordingFolderBeforeVar = useRef<string | null>(null);
 
-  const { startRecording: startBufferRecording, stopRecording: stopBufferRecording, getBuffer, bufferDurations } = useVideoBuffer();
+  const { startRecording: startBufferRecording, stopRecording: stopBufferRecording, pauseAllRecording, resumeAllRecording, getBuffer, bufferDurations } = useVideoBuffer();
   const recording = useRecording();
+  const [bufferPaused, setBufferPaused] = useState(false);
+
+  // VAR history: store last N captures
+  interface VarCapture {
+    id: string;
+    timestamp: number;
+    durationMs: number;
+    blobs: Map<SlotId, string>; // blob URLs (kept alive until cleared)
+    offsets: Map<SlotId, number>;
+  }
+  const [varHistory, setVarHistory] = useState<VarCapture[]>([]);
+  const MAX_HISTORY = 5;
 
   const frameInterval = 1 / fps;
   const varDurationSec = varDurationMs / 1000;
@@ -185,7 +197,27 @@ export default function ArbitragePage() {
     setIsPlaying(false);
     setExpandedSlot(null);
     setVideoZoom(1);
-    for (const url of varBlobs.values()) URL.revokeObjectURL(url);
+
+    // Save current capture to history (blobs kept alive)
+    if (varBlobs.size > 0) {
+      const capture: VarCapture = {
+        id: `var-${Date.now()}`,
+        timestamp: Date.now(),
+        durationMs: varDurationMs,
+        blobs: new Map(varBlobs),
+        offsets: new Map(varOffsets),
+      };
+      setVarHistory((prev) => {
+        // Keep only last MAX_HISTORY, revoke old ones
+        const trimmed = [capture, ...prev];
+        const overflow = trimmed.slice(MAX_HISTORY);
+        for (const old of overflow) {
+          for (const url of old.blobs.values()) URL.revokeObjectURL(url);
+        }
+        return trimmed.slice(0, MAX_HISTORY);
+      });
+    }
+
     setVarBlobs(new Map());
     varVideoRefs.current.clear();
     clearInterval(frameUpdateRef.current);
@@ -202,7 +234,41 @@ export default function ArbitragePage() {
       }
     }
     wasRecordingBeforeVar.current = false;
-  }, [varBlobs, slots, streams, startBufferRecording, recording]);
+  }, [varBlobs, varDurationMs, varOffsets, slots, streams, startBufferRecording, recording]);
+
+  // Replay a past VAR capture
+  const replayHistoryCapture = useCallback((capture: VarCapture) => {
+    // Stop buffer recording
+    for (const slot of slots) stopBufferRecording(slot.slotId);
+
+    wasRecordingBeforeVar.current = recording.isRecording;
+    recordingFolderBeforeVar.current = recording.recordingFolder;
+    if (recording.isRecording) recording.stopAll();
+
+    setVarOffsets(capture.offsets);
+    setVarDurationMs(capture.durationMs);
+    setVarBlobs(capture.blobs);
+    setVarMode(true);
+    setExpandedSlot(null);
+    setVideoZoom(1);
+    setPlaybackRate(1);
+    varTimeRef.current = 0;
+    frameCounterRef.current = 0;
+    setCurrentTimeDisplay(0);
+    setCurrentFrame(0);
+    setTotalFrames(Math.round((capture.durationMs / 1000) * FPS_DEFAULT));
+  }, [slots, stopBufferRecording, recording]);
+
+  // Pause/resume buffer recording (between fights)
+  const toggleBufferPause = useCallback(() => {
+    if (bufferPaused) {
+      resumeAllRecording();
+      setBufferPaused(false);
+    } else {
+      pauseAllRecording();
+      setBufferPaused(true);
+    }
+  }, [bufferPaused, pauseAllRecording, resumeAllRecording]);
 
   // ============ Frame stepping — deterministic counter + camera sync ============
 
@@ -552,7 +618,48 @@ export default function ArbitragePage() {
               {recording.isRecording ? 'STOP' : 'REC'}
             </button>
           )}
+          {/* Pause buffer button (save CPU between fights) */}
+          <button onClick={toggleBufferPause} style={{
+            pointerEvents: 'auto', display: 'flex', alignItems: 'center', gap: 6,
+            padding: '8px 14px',
+            border: bufferPaused ? '2px solid #ff8c00' : '2px solid var(--border)',
+            borderRadius: 24,
+            background: bufferPaused ? 'rgba(255, 140, 0, 0.2)' : 'rgba(18, 18, 26, 0.9)',
+            color: bufferPaused ? '#ff8c00' : 'var(--text)', cursor: 'pointer',
+            fontFamily: 'var(--font-ui)', fontWeight: 700, fontSize: '0.8rem',
+            textTransform: 'uppercase', backdropFilter: 'blur(8px)',
+          }}>
+            {bufferPaused ? '▶ REPRENDRE' : '⏸ PAUSE'}
+          </button>
           <button className="btn-var" onClick={handleVarPress} style={{ pointerEvents: 'auto', padding: '14px 40px', fontSize: '1.4rem' }}>VAR</button>
+        </div>
+      )}
+
+      {/* VAR history — top right when live */}
+      {!varMode && varHistory.length > 0 && (
+        <div style={{
+          position: 'fixed', top: 60, right: 16, zIndex: 40,
+          background: 'rgba(18, 18, 26, 0.9)', border: '1px solid var(--border)',
+          padding: 10, maxWidth: 220, backdropFilter: 'blur(8px)',
+        }}>
+          <div style={{ fontFamily: 'var(--font-ui)', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--text-muted)', marginBottom: 8 }}>
+            Historique VAR
+          </div>
+          {varHistory.map((c) => {
+            const d = new Date(c.timestamp);
+            const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+            return (
+              <button key={c.id} onClick={() => replayHistoryCapture(c)}
+                style={{
+                  display: 'block', width: '100%', marginBottom: 4,
+                  padding: '6px 10px', border: '1px solid var(--red-border)',
+                  background: 'transparent', color: 'var(--red)', cursor: 'pointer',
+                  fontFamily: 'var(--font-mono)', fontSize: '0.75rem', textAlign: 'left',
+                }}>
+                {timeStr} — {Math.round(c.durationMs / 1000)}s
+              </button>
+            );
+          })}
         </div>
       )}
 
