@@ -1,6 +1,6 @@
 {
   "name": "saber-var",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Système VAR pour Saber Tour — Vidéo arbitrage sabre laser",
   "main": "electron/main.js",
   "scripts": {
@@ -13,6 +13,11 @@
   "build": {
     "appId": "com.sabertour.var",
     "productName": "SABER VAR",
+    "publish": {
+      "provider": "github",
+      "owner": "FrenchOreo",
+      "repo": "sabertour-var"
+    },
     "files": [
       "electron/**/*",
       "client/dist/**/*",
@@ -40,9 +45,11 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "dependencies": {
+  "devDependencies": {
     "electron": "^41.1.1",
-    "electron-builder": "^26.8.1",
+    "electron-builder": "^26.8.1"
+  },
+  "dependencies": {
     "express": "^5.2.1",
     "selfsigned": "^2.4.1",
     "ws": "^8.20.0"
