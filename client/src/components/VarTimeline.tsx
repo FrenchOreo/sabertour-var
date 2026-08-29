@@ -5,13 +5,18 @@ interface VarTimelineProps {
   currentTimeMs: number;
   fps: number;
   onSeek: (timeMs: number) => void;
+  /** Impacts détectés par l'analyse IA (ms) — cliquables, le clic s'aimante dessus */
+  markers?: number[];
 }
+
+const MARKER_SNAP_PX = 8;
 
 export default function VarTimeline({
   durationMs,
   currentTimeMs,
   fps,
   onSeek,
+  markers,
 }: VarTimelineProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -74,6 +79,29 @@ export default function VarTimeline({
       }
     }
 
+    // Impact markers (analyse IA)
+    if (markers && markers.length > 0) {
+      for (const m of markers) {
+        if (m < 0 || m > durationMs) continue;
+        const x = (m / durationMs) * w;
+        ctx.strokeStyle = '#ffb020';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x, h * 0.25);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+        // Losange en tête de marqueur
+        ctx.fillStyle = '#ffb020';
+        ctx.beginPath();
+        ctx.moveTo(x, h * 0.08);
+        ctx.lineTo(x + 4, h * 0.2);
+        ctx.lineTo(x, h * 0.32);
+        ctx.lineTo(x - 4, h * 0.2);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
     // Cursor (current position)
     const cursorX = progress * w;
     ctx.strokeStyle = '#ff3b3b';
@@ -91,7 +119,7 @@ export default function VarTimeline({
     ctx.lineTo(cursorX, 8);
     ctx.closePath();
     ctx.fill();
-  }, [durationMs, currentTimeMs]);
+  }, [durationMs, currentTimeMs, markers]);
 
   useEffect(() => {
     draw();
@@ -106,32 +134,49 @@ export default function VarTimeline({
   }, [draw]);
 
   const getTimeFromX = useCallback(
-    (clientX: number) => {
+    (clientX: number, snapToMarkers = false) => {
       const canvas = canvasRef.current;
       if (!canvas || durationMs <= 0) return 0;
       const rect = canvas.getBoundingClientRect();
       const x = clientX - rect.left;
       const ratio = Math.max(0, Math.min(1, x / rect.width));
-      return ratio * durationMs;
+      const timeMs = ratio * durationMs;
+
+      // Aimante le clic sur un marqueur d'impact proche
+      if (snapToMarkers && markers && markers.length > 0) {
+        let best: number | null = null;
+        let bestDistPx = MARKER_SNAP_PX;
+        for (const m of markers) {
+          const distPx = Math.abs(((m - timeMs) / durationMs) * rect.width);
+          if (distPx <= bestDistPx) {
+            bestDistPx = distPx;
+            best = m;
+          }
+        }
+        if (best !== null) return best;
+      }
+      return timeMs;
     },
-    [durationMs]
+    [durationMs, markers]
   );
 
   const handleMouseDown = (e: React.MouseEvent) => {
     isDragging.current = true;
-    onSeek(getTimeFromX(e.clientX));
+    onSeek(getTimeFromX(e.clientX, true));
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    const timeMs = getTimeFromX(e.clientX);
-    const timeSec = (timeMs / 1000).toFixed(1);
-    const frame = Math.round((timeMs / 1000) * fps);
+    const rawTimeMs = getTimeFromX(e.clientX);
+    const snappedMs = getTimeFromX(e.clientX, true);
+    const onMarker = snappedMs !== rawTimeMs;
+    const timeSec = (snappedMs / 1000).toFixed(1);
+    const frame = Math.round((snappedMs / 1000) * fps);
     const rect = canvasRef.current?.getBoundingClientRect();
     if (rect) {
-      setTooltip({ x: e.clientX - rect.left, text: `${timeSec}s | Frame ${frame}` });
+      setTooltip({ x: e.clientX - rect.left, text: `${onMarker ? '⚡ Impact — ' : ''}${timeSec}s | Frame ${frame}` });
     }
     if (isDragging.current) {
-      onSeek(timeMs);
+      onSeek(rawTimeMs);
     }
   };
 
@@ -147,7 +192,7 @@ export default function VarTimeline({
   // Touch support for mobile scrubbing
   const handleTouchStart = (e: React.TouchEvent) => {
     isDragging.current = true;
-    onSeek(getTimeFromX(e.touches[0].clientX));
+    onSeek(getTimeFromX(e.touches[0].clientX, true));
   };
 
   const handleTouchMove = (e: React.TouchEvent) => {

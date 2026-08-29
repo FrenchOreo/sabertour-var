@@ -49,7 +49,24 @@ Outil de vidéo-arbitrage pour le sabre laser sportif. Auto-hébergé, fonctionn
 | ↑ ↓ | ±10 frames |
 | Espace | Play/Pause |
 | 1/2/3/4 | Vitesse 1x / 0.5x / 0.25x / 0.1x |
+| A | Analyse IA (marqueurs d'impacts + synchro auto) |
 | Escape | Reprendre le live |
+
+### Analyse IA et synchro (mode VAR)
+
+- **⚡ ANALYSE IA** (ou touche `A`) : détecte les impacts probables et les marque
+  en orange sur la timeline (le clic s'aimante dessus), puis resynchronise
+  automatiquement les caméras entre elles par corrélation du mouvement.
+- **−1f / +1f** sur chaque tuile : recalage manuel d'une caméra à la frame près.
+- En direct, chaque tuile affiche un point de santé réseau (vert/orange/rouge)
+  avec débit, fps et perte de paquets — tout doit être vert avant le combat.
+- Détails et feuille de route : [docs/DETECTION-IA.md](docs/DETECTION-IA.md)
+
+### Qualité vidéo instable ? Commencer par le matériel
+
+Le guide [docs/HARDWARE.md](docs/HARDWARE.md) explique le setup à moins de 150 €
+qui stabilise tout : routeur 5 GHz dédié, PC arbitre en Ethernet, éclairage piste,
+téléphones sur secteur, et le réglage 60 fps (Paramètres → Fluidité caméra).
 
 ### Dépannage
 
@@ -72,7 +89,9 @@ server/src/signaling.ts  — Relais WebSocket (signalisation WebRTC)
 server/src/camera-registry.ts — Registre slots + tokens
 client/src/pages/        — SetupPage, CameraPage, ArbitragePage
 client/src/components/   — CameraTile, VarTimeline, FrameCounter
-client/src/hooks/        — useSignaling, useWebRTC, useVideoBuffer, useFramePlayer
+client/src/hooks/        — useSignaling, useWebRTC, useVideoBuffer, useFramePlayer,
+                           useConnectionStats (santé réseau + latence par caméra)
+client/src/lib/varAnalysis.ts — analyse IA : impacts + synchro auto (corrélation croisée)
 ```
 
 Le système fonctionne entièrement en réseau local. Les flux vidéo passent en WebRTC peer-to-peer entre les téléphones et l'ordinateur arbitre. Le serveur ne fait que relayer les messages de signalisation.

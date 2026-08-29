@@ -2,17 +2,18 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCCamera } from '../hooks/useWebRTC';
 import { SlotId, WsMessage } from 'shared/types';
-import { getResolutionConstraints, getResolution, setResolution, RESOLUTION_OPTIONS, Resolution } from '../lib/qualitySettings';
+import { getResolutionConstraints, getResolution, setResolution, RESOLUTION_OPTIONS, Resolution, getFrameRate, setFrameRate, FRAMERATE_OPTIONS, FrameRate } from '../lib/qualitySettings';
 
 type CameraStatus = 'init' | 'permission' | 'connecting' | 'live' | 'reconnecting' | 'error';
 
 async function getCameraStream(): Promise<MediaStream> {
   const res = getResolutionConstraints();
+  const fps = getFrameRate();
   const constraints = [
     // Try exact resolution first (forces full quality from the start)
-    { video: { facingMode: 'environment', width: { exact: res.width.ideal }, height: { exact: res.height.ideal } }, audio: false },
+    { video: { facingMode: 'environment', width: { exact: res.width.ideal }, height: { exact: res.height.ideal }, frameRate: { ideal: fps } }, audio: false },
     // Fallback to ideal (browser picks closest match)
-    { video: { facingMode: 'environment', ...res }, audio: false },
+    { video: { facingMode: 'environment', ...res, frameRate: { ideal: fps } }, audio: false },
     // Fallback to just facing mode
     { video: { facingMode: 'environment' }, audio: false },
     // Last resort
@@ -21,7 +22,13 @@ async function getCameraStream(): Promise<MediaStream> {
 
   for (const constraint of constraints) {
     try {
-      return await navigator.mediaDevices.getUserMedia(constraint);
+      const stream = await navigator.mediaDevices.getUserMedia(constraint);
+      // Le contenu est du mouvement rapide : l'encodeur WebRTC privilégie
+      // la fluidité temporelle plutôt que le détail statique
+      for (const track of stream.getVideoTracks()) {
+        try { track.contentHint = 'motion'; } catch {}
+      }
+      return stream;
     } catch {
       continue;
     }
@@ -131,9 +138,12 @@ export default function CameraPage() {
     try {
       const res = getResolutionConstraints();
       const s = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: newMode, ...res },
+        video: { facingMode: newMode, ...res, frameRate: { ideal: getFrameRate() } },
         audio: false,
       });
+      for (const track of s.getVideoTracks()) {
+        try { track.contentHint = 'motion'; } catch {}
+      }
       stream?.getTracks().forEach((t) => t.stop());
       setStream(s);
       setFacingMode(newMode);
@@ -143,19 +153,30 @@ export default function CameraPage() {
     } catch {}
   };
 
-  // Change resolution
+  // Change resolution / framerate
   const [resolution, setResolutionState] = useState<Resolution>(getResolution);
+  const [frameRate, setFrameRateState] = useState<FrameRate>(getFrameRate);
   const [showSettings, setShowSettings] = useState(false);
-  const handleResolutionChange = async (newRes: Resolution) => {
-    setResolution(newRes);
-    setResolutionState(newRes);
-    // Restart stream with new resolution
+
+  const restartStream = async () => {
     try {
       const s = await getCameraStream();
       stream?.getTracks().forEach((t) => t.stop());
       setStream(s);
       if (videoRef.current) videoRef.current.srcObject = s;
     } catch {}
+  };
+
+  const handleResolutionChange = async (newRes: Resolution) => {
+    setResolution(newRes);
+    setResolutionState(newRes);
+    await restartStream();
+  };
+
+  const handleFrameRateChange = async (newFps: FrameRate) => {
+    setFrameRate(newFps);
+    setFrameRateState(newFps);
+    await restartStream();
   };
 
   const statusConfig: Record<CameraStatus, { color: string; text: string; animate: boolean }> = {
@@ -296,6 +317,28 @@ export default function CameraPage() {
               style={{ width: '100%' }}
             >
               {RESOLUTION_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <label
+              style={{
+                display: 'block',
+                fontSize: '0.8rem',
+                margin: '12px 0 6px',
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+                color: 'var(--text-muted)',
+              }}
+            >
+              Fluidité :
+            </label>
+            <select
+              className="input"
+              value={frameRate}
+              onChange={(e) => handleFrameRateChange(Number(e.target.value) as FrameRate)}
+              style={{ width: '100%' }}
+            >
+              {FRAMERATE_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
