@@ -1,14 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { SlotState } from 'shared/types';
+import { ConnectionStats, getHealth } from '../hooks/useConnectionStats';
 
 interface CameraTileProps {
   slot: SlotState;
   stream: MediaStream | null;
   selected: boolean;
   onClick: () => void;
+  connectionStats?: ConnectionStats;
 }
 
-export default function CameraTile({ slot, stream, selected, onClick }: CameraTileProps) {
+const HEALTH_COLORS = { good: '#22c55e', degraded: '#ff8c00', bad: '#ff3b3b' } as const;
+
+export default function CameraTile({ slot, stream, selected, onClick, connectionStats }: CameraTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [stats, setStats] = useState<{ w: number; h: number; fps: number } | null>(null);
 
@@ -55,8 +59,36 @@ export default function CameraTile({ slot, stream, selected, onClick }: CameraTi
       )}
       <div className="label">{slot.name}</div>
       <div className={`status-dot ${slot.cameraConnected ? 'live' : 'offline'}`} />
-      {/* Stream info overlay */}
-      {stats && (
+      {/* Stream info overlay — stats réseau WebRTC si dispo, sinon réglages du track */}
+      {connectionStats ? (
+        <div style={{
+          position: 'absolute',
+          bottom: 6,
+          right: 6,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          fontFamily: 'var(--font-mono)',
+          fontSize: '0.6rem',
+          color: 'var(--text-muted)',
+          background: '#000000aa',
+          padding: '1px 5px',
+          lineHeight: 1.4,
+        }}>
+          <span style={{
+            display: 'inline-block', width: 7, height: 7, borderRadius: '50%',
+            background: HEALTH_COLORS[getHealth(connectionStats)],
+          }} />
+          {connectionStats.width > 0 && `${connectionStats.width}x${connectionStats.height} `}
+          {connectionStats.fps > 0 && `${connectionStats.fps}fps `}
+          {connectionStats.bitrateKbps > 0 && `${(connectionStats.bitrateKbps / 1000).toFixed(1)}Mb/s`}
+          {connectionStats.lossPct > 0.5 && (
+            <span style={{ color: HEALTH_COLORS[getHealth(connectionStats)] }}>
+              {connectionStats.lossPct.toFixed(1)}% perte
+            </span>
+          )}
+        </div>
+      ) : stats && (
         <div style={{
           position: 'absolute',
           bottom: 6,

@@ -1,10 +1,12 @@
 export type Resolution = '720p' | '1080p';
 export type BitrateLevel = 'low' | 'medium' | 'high';
 export type RecordingFormat = 'webm' | 'mp4';
+export type FrameRate = 30 | 60;
 
 const RESOLUTION_KEY = 'saber-var-camera-resolution';
 const BITRATE_KEY = 'saber-var-recording-bitrate';
 const FORMAT_KEY = 'saber-var-recording-format';
+const FRAMERATE_KEY = 'saber-var-camera-framerate';
 
 const RESOLUTION_MAP: Record<Resolution, { width: number; height: number }> = {
   '720p': { width: 1280, height: 720 },
@@ -30,6 +32,17 @@ export function setResolution(res: Resolution): void {
 export function getResolutionConstraints(): { width: { ideal: number }; height: { ideal: number } } {
   const res = RESOLUTION_MAP[getResolution()];
   return { width: { ideal: res.width }, height: { ideal: res.height } };
+}
+
+// 60 fps par défaut : une touche de sabre ne dure que 1-2 frames à 30 fps
+export function getFrameRate(): FrameRate {
+  const stored = localStorage.getItem(FRAMERATE_KEY);
+  if (stored === '30') return 30;
+  return 60;
+}
+
+export function setFrameRate(fps: FrameRate): void {
+  localStorage.setItem(FRAMERATE_KEY, String(fps));
 }
 
 export function getBitrateLevel(): BitrateLevel {
@@ -86,6 +99,11 @@ export const BITRATE_OPTIONS: { value: BitrateLevel; label: string }[] = [
 export const FORMAT_OPTIONS: { value: RecordingFormat; label: string }[] = [
   { value: 'mp4', label: 'MP4 (H.264) — recommandé' },
   { value: 'webm', label: 'WebM (VP8) — fallback' },
+];
+
+export const FRAMERATE_OPTIONS: { value: FrameRate; label: string }[] = [
+  { value: 60, label: '60 fps — recommandé (lames rapides)' },
+  { value: 30, label: '30 fps — économie batterie/CPU' },
 ];
 
 // ============ Buffer duration (VAR replay window) ============

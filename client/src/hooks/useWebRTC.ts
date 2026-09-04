@@ -34,7 +34,10 @@ export function useWebRTCCamera({ slotId, stream, send }: UseWebRTCCameraOptions
               params.encodings = [{}];
             }
             params.encodings[0].maxBitrate = 8_000_000; // 8 Mbps
-            params.degradationPreference = 'maintain-resolution';
+            // En cas de congestion WiFi, sacrifier la résolution plutôt que le
+            // framerate : pour le VAR image par image, perdre des frames est
+            // pire qu'une image plus douce (une touche dure 1-2 frames)
+            params.degradationPreference = 'maintain-framerate';
             sender.setParameters(params);
           } catch (e) {
             console.warn('[WebRTC] Could not set sender parameters:', e);
@@ -130,5 +133,9 @@ export function useWebRTCArbitre({ send, onTrack }: UseWebRTCArbitreOptions) {
     pcsRef.current.clear();
   }, []);
 
-  return { handleOffer, handleIceCandidate, connectToSlot, closeSlot, closeAll };
+  const getPeerConnection = useCallback((slotId: SlotId): RTCPeerConnection | undefined => {
+    return pcsRef.current.get(slotId);
+  }, []);
+
+  return { handleOffer, handleIceCandidate, connectToSlot, closeSlot, closeAll, getPeerConnection };
 }

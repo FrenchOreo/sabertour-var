@@ -1,7 +1,12 @@
 import { useRef, useCallback, useState } from 'react';
 import { getBitrate, getRecordingMimeType, getBufferDurationSec } from '../lib/qualitySettings';
 
-const CHUNK_INTERVAL_MS = 1000;
+// 250 ms : la granularité des chunks borne l'erreur de synchro entre caméras
+// (l'alignement se fait sur les timestamps d'arrivée des chunks)
+const CHUNK_INTERVAL_MS = 250;
+// Keyframe forcée chaque seconde : la purge du buffer coupe en frontière de
+// chunk, sans keyframe proche le début du replay serait illisible plusieurs secondes
+const KEYFRAME_INTERVAL_MS = 1000;
 
 interface TimedChunk {
   data: Uint8Array;
@@ -118,7 +123,9 @@ export function useVideoBuffer() {
     const recorder = new MediaRecorder(stream, {
       mimeType,
       videoBitsPerSecond: getBitrate(),
-    });
+      // Chromium 121+ ; ignoré par les navigateurs qui ne le supportent pas
+      videoKeyFrameIntervalDuration: KEYFRAME_INTERVAL_MS,
+    } as MediaRecorderOptions & { videoKeyFrameIntervalDuration: number });
 
     recorder.ondataavailable = async (e) => {
       if (e.data.size > 0) {

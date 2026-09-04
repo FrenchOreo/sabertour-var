@@ -3,12 +3,25 @@ import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCArbitre } from '../hooks/useWebRTC';
 import { useVideoBuffer } from '../hooks/useVideoBuffer';
 import { useRecording } from '../hooks/useRecording';
+import { useConnectionStats } from '../hooks/useConnectionStats';
+import { extractMotionSignal, findImpactSpikes, estimateOffsetSec, MotionSignal } from '../lib/varAnalysis';
 import CameraTile from '../components/CameraTile';
 import VarTimeline from '../components/VarTimeline';
 import FrameCounter from '../components/FrameCounter';
 import { SlotId, SlotState, WsMessage } from 'shared/types';
 
 const FPS_DEFAULT = 30;
+
+/** Cale le fps mesuré (fluctuant) sur la cadence de capture la plus proche */
+function snapFps(measured: number | undefined): number {
+  if (!measured || measured < 10) return FPS_DEFAULT;
+  const COMMON = [24, 25, 30, 50, 60];
+  let best = COMMON[0];
+  for (const c of COMMON) {
+    if (Math.abs(c - measured) < Math.abs(best - measured)) best = c;
+  }
+  return best;
+}
 
 export default function ArbitragePage() {
   const [slots, setSlots] = useState<SlotState[]>([]);
@@ -24,7 +37,14 @@ export default function ArbitragePage() {
   const [currentTimeDisplay, setCurrentTimeDisplay] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [videoZoom, setVideoZoom] = useState(1);
-  const [fps] = useState(FPS_DEFAULT);
+  // Cadence du replay : mesurée sur la caméra maître à l'appui VAR (plus de 30 fps codé en dur)
+  const [fps, setFps] = useState(FPS_DEFAULT);
+
+  // Analyse IA (détection d'impacts + synchro auto)
+  const [impactMarkers, setImpactMarkers] = useState<number[]>([]);
+  const [analysisStatus, setAnalysisStatus] = useState<string | null>(null);
+  const [analysisSummary, setAnalysisSummary] = useState<string | null>(null);
+  const analysisAbortRef = useRef<{ aborted: boolean } | null>(null);
 
   // Persistent VAR video refs — one per camera, never unmounted during VAR
   const varVideoRefs = useRef<Map<SlotId, HTMLVideoElement>>(new Map());
@@ -49,6 +69,7 @@ export default function ArbitragePage() {
     durationMs: number;
     blobs: Map<SlotId, string>; // blob URLs (kept alive until cleared)
     offsets: Map<SlotId, number>;
+    fps: number;
   }
   const [varHistory, setVarHistory] = useState<VarCapture[]>([]);
   const MAX_HISTORY = 5;
@@ -125,6 +146,9 @@ export default function ArbitragePage() {
   const webrtc = useWebRTCArbitre({ send, onTrack });
   webrtcRef.current = webrtc;
 
+  // Télémétrie WebRTC : santé réseau affichée en direct + latence par caméra pour la synchro VAR
+  const { stats: connStats, getStatsSnapshot } = useConnectionStats(webrtc.getPeerConnection);
+
   useEffect(() => { if (connected) send({ type: 'arbitre-join' }); }, [connected, send]);
   useEffect(() => {
     for (const slot of slots) {
@@ -155,7 +179,12 @@ export default function ArbitragePage() {
         const dur = buffer.getReplayDurationMs();
         if (dur > maxDurationMs) maxDurationMs = dur;
         const firstTs = buffer.getFirstChunkTimestamp();
-        if (firstTs > 0) startTimes.set(slot.slotId, firstTs);
+        if (firstTs > 0) {
+          // Les timestamps de chunks sont des heures d'ARRIVÉE : chaque caméra a sa
+          // propre latence réseau (WiFi). On la soustrait pour approcher l'heure de capture.
+          const latencyMs = getStatsSnapshot(slot.slotId)?.latencyMs ?? 0;
+          startTimes.set(slot.slotId, firstTs - latencyMs);
+        }
       }
     }
 
@@ -169,14 +198,28 @@ export default function ArbitragePage() {
       return;
     }
 
-    // Compute per-camera offsets: align all cameras to the one that started earliest
+    // Offsets par caméra : la timeline 0 = début de capture de la caméra la plus ancienne.
+    // Une caméra qui a commencé à bufferiser PLUS TARD possède moins de passé : à l'instant
+    // timeline t elle doit afficher son temps média t − (t_i − minStart), donc offset NÉGATIF
+    // (currentTime = t + offset). L'ancien code inversait le signe et doublait la désynchro.
     const offsets = new Map<SlotId, number>();
     if (startTimes.size > 1) {
       const minStart = Math.min(...startTimes.values());
       for (const [id, t] of startTimes) {
-        offsets.set(id, (t - minStart) / 1000); // offset in seconds
+        offsets.set(id, (minStart - t) / 1000); // secondes, ≤ 0
       }
     }
+
+    // Cadence réelle de la caméra maître (première avec des données)
+    const masterSlotId = urls.keys().next().value as SlotId | undefined;
+    const nextFps = snapFps(masterSlotId !== undefined ? getStatsSnapshot(masterSlotId)?.fps : undefined);
+    setFps(nextFps);
+
+    // Réinitialiser l'analyse IA de la capture précédente
+    if (analysisAbortRef.current) analysisAbortRef.current.aborted = true;
+    setAnalysisStatus(null);
+    setAnalysisSummary(null);
+    setImpactMarkers([]);
 
     setVarOffsets(offsets);
     setVarDurationMs(maxDurationMs);
@@ -189,14 +232,20 @@ export default function ArbitragePage() {
     frameCounterRef.current = 0;
     setCurrentTimeDisplay(0);
     setCurrentFrame(0);
-    setTotalFrames(Math.round((maxDurationMs / 1000) * FPS_DEFAULT));
-  }, [slots, getBuffer, stopBufferRecording, recording, streams, startBufferRecording]);
+    setTotalFrames(Math.round((maxDurationMs / 1000) * nextFps));
+  }, [slots, getBuffer, stopBufferRecording, recording, streams, startBufferRecording, getStatsSnapshot]);
 
   const exitVarMode = useCallback(() => {
     setVarMode(false);
     setIsPlaying(false);
     setExpandedSlot(null);
     setVideoZoom(1);
+
+    // Stopper une analyse IA en cours
+    if (analysisAbortRef.current) analysisAbortRef.current.aborted = true;
+    setAnalysisStatus(null);
+    setAnalysisSummary(null);
+    setImpactMarkers([]);
 
     // Save current capture to history (blobs kept alive)
     if (varBlobs.size > 0) {
@@ -206,6 +255,7 @@ export default function ArbitragePage() {
         durationMs: varDurationMs,
         blobs: new Map(varBlobs),
         offsets: new Map(varOffsets),
+        fps,
       };
       setVarHistory((prev) => {
         // Keep only last MAX_HISTORY, revoke old ones
@@ -234,7 +284,7 @@ export default function ArbitragePage() {
       }
     }
     wasRecordingBeforeVar.current = false;
-  }, [varBlobs, varDurationMs, varOffsets, slots, streams, startBufferRecording, recording]);
+  }, [varBlobs, varDurationMs, varOffsets, fps, slots, streams, startBufferRecording, recording]);
 
   // Replay a past VAR capture
   const replayHistoryCapture = useCallback((capture: VarCapture) => {
@@ -245,6 +295,12 @@ export default function ArbitragePage() {
     recordingFolderBeforeVar.current = recording.recordingFolder;
     if (recording.isRecording) recording.stopAll();
 
+    if (analysisAbortRef.current) analysisAbortRef.current.aborted = true;
+    setAnalysisStatus(null);
+    setAnalysisSummary(null);
+    setImpactMarkers([]);
+
+    setFps(capture.fps);
     setVarOffsets(capture.offsets);
     setVarDurationMs(capture.durationMs);
     setVarBlobs(capture.blobs);
@@ -256,7 +312,7 @@ export default function ArbitragePage() {
     frameCounterRef.current = 0;
     setCurrentTimeDisplay(0);
     setCurrentFrame(0);
-    setTotalFrames(Math.round((capture.durationMs / 1000) * FPS_DEFAULT));
+    setTotalFrames(Math.round((capture.durationMs / 1000) * capture.fps));
   }, [slots, stopBufferRecording, recording]);
 
   // Pause/resume buffer recording (between fights)
@@ -269,6 +325,100 @@ export default function ArbitragePage() {
       setBufferPaused(true);
     }
   }, [bufferPaused, pauseAllRecording, resumeAllRecording]);
+
+  // ============ Analyse IA : détection d'impacts + synchro auto ============
+  const runAnalysis = useCallback(async () => {
+    if (analysisStatus || varBlobs.size === 0) return;
+    const abort = { aborted: false };
+    analysisAbortRef.current = abort;
+    const expected = varDurationMs / 1000;
+    const entries = [...varBlobs.entries()];
+    const masterSlotId = getMasterEntry()?.[0] ?? entries[0][0];
+
+    try {
+      const signals = new Map<SlotId, MotionSignal>();
+      let done = 0;
+      for (const [slotId, url] of entries) {
+        if (abort.aborted) return;
+        done++;
+        setAnalysisStatus(`Analyse caméra ${done}/${entries.length}…`);
+        try {
+          const sig = await extractMotionSignal(url, { expectedDurationSec: expected, abort });
+          if (sig.times.length > 10) signals.set(slotId, sig);
+        } catch {
+          // caméra illisible — on continue avec les autres
+        }
+      }
+      if (abort.aborted) return;
+
+      const masterSig = signals.get(masterSlotId);
+      const masterOffset = varOffsets.get(masterSlotId) || 0;
+
+      // Signaux ramenés dans le référentiel timeline (temps média − offset courant) :
+      // la corrélation ne mesure alors que le RÉSIDU de désynchro, ce qui reste
+      // valide même si une caméra s'est connectée bien après les autres
+      const toTimeline = (sig: MotionSignal, offset: number): MotionSignal => ({
+        times: sig.times.map((t) => t - offset),
+        values: sig.values,
+      });
+
+      let markerCount = 0;
+      let synced = 0;
+      if (masterSig) {
+        const masterAdj = toTimeline(masterSig, masterOffset);
+
+        // Marqueurs d'impacts (déjà en temps timeline)
+        const spikes = findImpactSpikes(masterAdj);
+        const markers = spikes
+          .map((s) => s * 1000)
+          .filter((ms) => ms >= 0 && ms <= varDurationMs);
+        setImpactMarkers(markers);
+        markerCount = markers.length;
+
+        // Synchro auto : les caméras filment la même scène, la corrélation croisée
+        // de leurs signaux de mouvement donne le décalage réel entre elles
+        const newOffsets = new Map(varOffsets);
+        for (const [slotId, sig] of signals) {
+          if (slotId === masterSlotId) continue;
+          const currentOffset = varOffsets.get(slotId) || 0;
+          const residual = estimateOffsetSec(masterAdj, toTimeline(sig, currentOffset));
+          if (residual !== null && Math.abs(residual) > 0.01) {
+            newOffsets.set(slotId, currentOffset + residual);
+            synced++;
+          }
+        }
+        if (synced > 0) {
+          setVarOffsets(newOffsets);
+          varVideoRefs.current.forEach((v, slotId) => {
+            v.currentTime = Math.max(0, varTimeRef.current + (newOffsets.get(slotId) || 0));
+          });
+        }
+      }
+
+      if (!masterSig) {
+        setAnalysisSummary('Analyse impossible sur cette capture');
+      } else {
+        const impactsTxt = `${markerCount} impact${markerCount > 1 ? 's' : ''}`;
+        const syncTxt = synced > 0 ? ` — ${synced} caméra${synced > 1 ? 's' : ''} resynchronisée${synced > 1 ? 's' : ''}` : '';
+        setAnalysisSummary(`⚡ ${impactsTxt}${syncTxt}`);
+      }
+    } finally {
+      if (analysisAbortRef.current === abort) {
+        setAnalysisStatus(null);
+        analysisAbortRef.current = null;
+      }
+    }
+  }, [analysisStatus, varBlobs, varDurationMs, varOffsets, getMasterEntry]);
+
+  // Ajustement manuel de synchro : décale une caméra de ±1 frame
+  const nudgeCamera = useCallback((slotId: SlotId, deltaFrames: number) => {
+    const newOffset = (varOffsets.get(slotId) || 0) + deltaFrames * frameInterval;
+    const next = new Map(varOffsets);
+    next.set(slotId, newOffset);
+    setVarOffsets(next);
+    const el = varVideoRefs.current.get(slotId);
+    if (el) el.currentTime = Math.max(0, varTimeRef.current + newOffset);
+  }, [varOffsets, frameInterval]);
 
   // ============ Frame stepping — deterministic counter + camera sync ============
 
@@ -409,6 +559,7 @@ export default function ArbitragePage() {
         case '2': handleSpeedChange(0.5); break;
         case '3': handleSpeedChange(0.25); break;
         case '4': handleSpeedChange(0.1); break;
+        case 'a': case 'A': runAnalysis(); break;
         case 'Escape':
           if (expandedSlot) { setExpandedSlot(null); setVideoZoom(1); pauseAll(); }
           else exitVarMode();
@@ -417,7 +568,7 @@ export default function ArbitragePage() {
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [varMode, expandedSlot, stepForward, stepBackward, togglePlayPause, handleSpeedChange, pauseAll, exitVarMode]);
+  }, [varMode, expandedSlot, stepForward, stepBackward, togglePlayPause, handleSpeedChange, pauseAll, exitVarMode, runAnalysis]);
 
   // Recording toggle
   const handleRecordToggle = useCallback(async () => {
@@ -458,6 +609,18 @@ export default function ArbitragePage() {
             style={{ padding: '4px 8px', fontSize: '0.75rem' }} onClick={() => handleSpeedChange(rate)}>{rate}x</button>
         ))}
       </div>
+      <button
+        className="btn"
+        onClick={runAnalysis}
+        disabled={!!analysisStatus}
+        title="Détecte les impacts probables (marqueurs timeline) et resynchronise les caméras (touche A)"
+        style={{ padding: '6px 12px', fontSize: '0.8rem', borderColor: '#ffb02066', color: '#ffb020' }}
+      >
+        {analysisStatus ?? '⚡ ANALYSE IA'}
+      </button>
+      {analysisSummary && (
+        <span className="font-mono" style={{ fontSize: '0.75rem', color: '#ffb020' }}>{analysisSummary}</span>
+      )}
       <button className="btn-live" onClick={exitVarMode} style={{ padding: '8px 20px', fontSize: '0.85rem', marginLeft: 8 }}>
         REPRENDRE LE LIVE
       </button>
@@ -491,7 +654,7 @@ export default function ArbitragePage() {
       {isLiveGrid && (
         <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gridTemplateRows: 'repeat(2, 1fr)', gap: 4, padding: 4, minHeight: 0 }}>
           {slots.map((slot) => (
-            <CameraTile key={slot.slotId} slot={slot} stream={streams.get(slot.slotId) || null} selected={false} onClick={() => setExpandedSlot(slot.slotId)} />
+            <CameraTile key={slot.slotId} slot={slot} stream={streams.get(slot.slotId) || null} selected={false} onClick={() => setExpandedSlot(slot.slotId)} connectionStats={connStats.get(slot.slotId)} />
           ))}
           {slots.length === 0 && (
             <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontFamily: 'var(--font-ui)', textTransform: 'uppercase' }}>
@@ -576,6 +739,28 @@ export default function ArbitragePage() {
                   {!expandedSlot && (
                     <div className="label" style={{ color: 'var(--red)' }}>{slot.name}</div>
                   )}
+                  {/* Ajustement fin de synchro par caméra (±1 frame) */}
+                  {!expandedSlot && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        position: 'absolute', bottom: 6, left: 6, zIndex: 2,
+                        display: 'flex', alignItems: 'center', gap: 4,
+                        background: '#000000aa', padding: '2px 6px', border: '1px solid var(--border)',
+                        cursor: 'default',
+                      }}
+                    >
+                      <button className="btn" style={{ padding: '0 6px', fontSize: '0.7rem' }}
+                        title="Retarder cette caméra d'une frame"
+                        onClick={() => nudgeCamera(slot.slotId, -1)}>−1f</button>
+                      <span className="font-mono" style={{ fontSize: '0.65rem', color: 'var(--text-muted)', minWidth: 44, textAlign: 'center' }}>
+                        {Math.round((varOffsets.get(slot.slotId) || 0) * 1000)}ms
+                      </span>
+                      <button className="btn" style={{ padding: '0 6px', fontSize: '0.7rem' }}
+                        title="Avancer cette caméra d'une frame"
+                        onClick={() => nudgeCamera(slot.slotId, 1)}>+1f</button>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -595,7 +780,7 @@ export default function ArbitragePage() {
 
           {/* Timeline */}
           <div style={{ padding: '4px 12px', flexShrink: 0 }}>
-            <VarTimeline durationMs={varDurationMs} currentTimeMs={currentTimeDisplay * 1000} fps={fps} onSeek={handleSeek} />
+            <VarTimeline durationMs={varDurationMs} currentTimeMs={currentTimeDisplay * 1000} fps={fps} onSeek={handleSeek} markers={impactMarkers} />
           </div>
 
           {/* Controls */}

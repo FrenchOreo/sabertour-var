@@ -5,7 +5,8 @@ import {
   getBitrateLevel, setBitrateLevel, BITRATE_OPTIONS,
   getRecordingFormat, setRecordingFormat, FORMAT_OPTIONS,
   getBufferDurationSec, setBufferDurationSec, BUFFER_DURATION_OPTIONS,
-  Resolution, BitrateLevel, RecordingFormat,
+  getFrameRate, setFrameRate, FRAMERATE_OPTIONS,
+  Resolution, BitrateLevel, RecordingFormat, FrameRate,
 } from '../lib/qualitySettings';
 
 const STORAGE_KEY = 'saber-var-selected-ip';
@@ -20,6 +21,7 @@ export default function SettingsPage() {
   const [slots, setSlots] = useState<SlotState[]>([]);
   const [saved, setSaved] = useState(false);
   const [resolution, setResolutionState] = useState<Resolution>(getResolution);
+  const [frameRate, setFrameRateState] = useState<FrameRate>(getFrameRate);
   const [bitrateLevel, setBitrateLevelState] = useState<BitrateLevel>(getBitrateLevel);
   const [recordingFormat, setRecordingFormatState] = useState<RecordingFormat>(getRecordingFormat);
   const [bufferDuration, setBufferDurationState] = useState<number>(getBufferDurationSec);
@@ -392,6 +394,35 @@ export default function SettingsPage() {
                 letterSpacing: '0.05em',
               }}
             >
+              Fluidité caméra (framerate) :
+            </label>
+            <select
+              className="input"
+              value={frameRate}
+              onChange={(e) => setFrameRateState(Number(e.target.value) as FrameRate)}
+              style={{ maxWidth: 300 }}
+            >
+              {FRAMERATE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <p className="text-muted" style={{ fontSize: '0.75rem', marginTop: 4 }}>
+              60 fps recommandé : une touche ne dure que 1-2 images à 30 fps.
+              720p60 donne un meilleur VAR que 1080p30.
+            </p>
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label
+              className="text-muted"
+              style={{
+                display: 'block',
+                fontSize: '0.85rem',
+                marginBottom: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
               Débit vidéo (bitrate) :
             </label>
             <select
@@ -467,6 +498,7 @@ export default function SettingsPage() {
               className="btn"
               onClick={() => {
                 setResolution(resolution);
+                setFrameRate(frameRate);
                 setBitrateLevel(bitrateLevel);
                 setRecordingFormat(recordingFormat);
                 setBufferDurationSec(bufferDuration);
