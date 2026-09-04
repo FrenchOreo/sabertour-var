@@ -133,9 +133,13 @@ export function useVideoBuffer() {
         buffer.addChunk(arrayBuffer, isFirstChunk);
         isFirstChunk = false;
 
+        // Un chunk toutes les 250 ms × 4 caméras = 16 re-renders/s si on publie à chaque fois :
+        // on n'expose la durée qu'à la seconde entière (React ignore un state identique)
         setBufferDurations((prev) => {
+          const roundedMs = Math.floor(buffer.getBufferDurationMs() / 1000) * 1000;
+          if (prev.get(slotId) === roundedMs) return prev;
           const next = new Map(prev);
-          next.set(slotId, buffer.getBufferDurationMs());
+          next.set(slotId, roundedMs);
           return next;
         });
       }

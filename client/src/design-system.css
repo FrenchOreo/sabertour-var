@@ -289,3 +289,113 @@ html, body, #root {
   from { opacity: 0; transform: translateX(-50%) translateY(10px); }
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
+
+/* ============ Contrôles VAR — cibles tactiles ≥ 48 px (bénévole debout, écran parfois tactile) ============ */
+.var-controls {
+  padding: 10px 14px;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px 18px;
+  flex-shrink: 0;
+}
+.var-group { display: flex; align-items: center; gap: 8px; }
+.var-ctl {
+  background: transparent;
+  border: 1px solid var(--cyan-border);
+  color: var(--cyan);
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: 0.05em;
+  min-height: 48px;
+  min-width: 60px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.var-ctl:hover { background: var(--cyan-dim); box-shadow: var(--glow-cyan); }
+.var-ctl:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; }
+.var-ctl.primary { font-size: 1.5rem; min-width: 80px; border-width: 2px; }
+.var-ctl.impact { border-color: #ffb02088; color: #ffb020; }
+.var-ctl.impact:hover { background: #ffb02018; box-shadow: 0 0 20px #ffb02044; }
+.var-ctl.analyse { border-color: #ffb02066; color: #ffb020; letter-spacing: 0.1em; text-transform: uppercase; }
+.var-ctl.analyse:hover { background: #ffb02018; box-shadow: 0 0 20px #ffb02044; }
+.var-frame { font-size: 1.1rem; color: var(--cyan); min-width: 120px; text-align: center; }
+.var-impact-count { font-size: 0.95rem; color: #ffb020; min-width: 130px; text-align: center; }
+.var-summary { font-size: 0.85rem; color: #ffb020; }
+.speed-btn.lg { min-height: 44px; min-width: 56px; padding: 8px 12px; font-size: 1rem; }
+.btn-live.var-ctl-live { min-height: 48px; padding: 8px 22px; font-size: 1rem; margin-left: 8px; }
+.nudge-btn { min-height: 36px; padding: 0 10px; font-size: 0.85rem; }
+
+/* ============ Bandeau GO / NO-GO ============ */
+.readiness {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  border-left: 5px solid;
+  flex-shrink: 0;
+  background: var(--bg-surface);
+}
+.readiness-icon { font-size: 1.4rem; line-height: 1; }
+.readiness-title {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 1.1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.readiness-details { font-size: 0.85rem; color: var(--text-muted); margin-top: 2px; }
+.readiness.ready { border-color: #22c55e; background: #22c55e12; }
+.readiness.ready .readiness-title, .readiness.ready .readiness-icon { color: #22c55e; }
+.readiness.warning { border-color: var(--orange); background: #ff8c0012; }
+.readiness.warning .readiness-title, .readiness.warning .readiness-icon { color: var(--orange); }
+.readiness.blocked { border-color: var(--red); background: var(--red-dim); }
+.readiness.blocked .readiness-title, .readiness.blocked .readiness-icon { color: var(--red); }
+.readiness.blocked .readiness-icon { animation: blink 1.2s infinite; }
+.readiness.idle { border-color: var(--text-dim); }
+.readiness.idle .readiness-title, .readiness.idle .readiness-icon { color: var(--text-muted); }
+.readiness .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.readiness .chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.readiness .chip-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.readiness .chip-val { color: var(--text-muted); }
+
+/* ============ Tuile flux perdu ============ */
+.camera-tile.frozen { border-color: var(--red); animation: frozen-pulse 1.2s ease-in-out infinite; }
+@keyframes frozen-pulse {
+  0%, 100% { box-shadow: 0 0 0 #ff3b3b00; }
+  50% { box-shadow: var(--glow-red); }
+}
+.tile-frozen-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: #000000a6;
+  color: var(--red);
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 1.1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  text-align: center;
+  pointer-events: none;
+}
+.tile-frozen-overlay .sub { font-size: 0.8rem; color: var(--text-muted); letter-spacing: 0.05em; text-transform: none; }

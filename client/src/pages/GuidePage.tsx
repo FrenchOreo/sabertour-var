@@ -200,10 +200,12 @@ export default function GuidePage() {
                   ['↑ (flèche haut)', 'Avancer de 10 images'],
                   ['↓ (flèche bas)', 'Reculer de 10 images'],
                   ['Espace', 'Lecture / Pause'],
-                  ['1', 'Vitesse x0.25'],
+                  ['1', 'Vitesse x1'],
                   ['2', 'Vitesse x0.5'],
-                  ['3', 'Vitesse x1'],
-                  ['4', 'Vitesse x2'],
+                  ['3', 'Vitesse x0.25'],
+                  ['4', 'Vitesse x0.1'],
+                  ['A', 'Analyse IA : marqueurs des impacts + synchro auto'],
+                  ['Maj + ← / →', 'Impact précédent / suivant'],
                   ['Échap', 'Retour au direct'],
                 ].map(([key, action], i) => (
                   <tr
