@@ -3,14 +3,22 @@ import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCArbitre } from '../hooks/useWebRTC';
 import { useVideoBuffer } from '../hooks/useVideoBuffer';
 import { useRecording } from '../hooks/useRecording';
-import { useConnectionStats } from '../hooks/useConnectionStats';
+import { useConnectionStats, getHealth, STALL_POLLS_FROZEN } from '../hooks/useConnectionStats';
 import { extractMotionSignal, findImpactSpikes, estimateOffsetSec, MotionSignal } from '../lib/varAnalysis';
+import { computeReadiness } from '../lib/readiness';
+import { adjacentMarker, currentMarkerIndex } from '../lib/markers';
+import { getBufferDurationSec } from '../lib/qualitySettings';
 import CameraTile from '../components/CameraTile';
 import VarTimeline from '../components/VarTimeline';
 import FrameCounter from '../components/FrameCounter';
+import ReadinessBanner from '../components/ReadinessBanner';
 import { SlotId, SlotState, WsMessage } from 'shared/types';
 
 const FPS_DEFAULT = 30;
+/** Délai minimal entre deux renégociations forcées d'une même caméra */
+const RECONNECT_COOLDOWN_MS = 15000;
+/** Un état « disconnected » qui dure plus longtemps est traité comme une perte de flux */
+const DISCONNECT_GRACE_MS = 4000;
 
 /** Cale le fps mesuré (fluctuant) sur la cadence de capture la plus proche */
 function snapFps(measured: number | undefined): number {
@@ -45,6 +53,13 @@ export default function ArbitragePage() {
   const [analysisStatus, setAnalysisStatus] = useState<string | null>(null);
   const [analysisSummary, setAnalysisSummary] = useState<string | null>(null);
   const analysisAbortRef = useRef<{ aborted: boolean } | null>(null);
+  const [analysisProgress, setAnalysisProgress] = useState<number | null>(null);
+  const lastProgressUpdate = useRef(0);
+
+  // Auto-réparation des flux : caméras dont le flux est perdu/gelé (overlay + renégociation)
+  const [frozenSlots, setFrozenSlots] = useState<Set<SlotId>>(new Set());
+  const lastReconnectAt = useRef<Map<SlotId, number>>(new Map());
+  const disconnectTimers = useRef<Map<SlotId, ReturnType<typeof setTimeout>>>(new Map());
 
   // Persistent VAR video refs — one per camera, never unmounted during VAR
   const varVideoRefs = useRef<Map<SlotId, HTMLVideoElement>>(new Map());
@@ -123,6 +138,13 @@ export default function ArbitragePage() {
   const onTrack = useCallback(
     (slotId: SlotId, stream: MediaStream) => {
       setStreams((prev) => new Map(prev).set(slotId, stream));
+      // Un nouveau flux arrive : la caméra n'est plus gelée
+      setFrozenSlots((prev) => {
+        if (!prev.has(slotId)) return prev;
+        const next = new Set(prev);
+        next.delete(slotId);
+        return next;
+      });
       startBufferRecording(slotId, stream);
     },
     [startBufferRecording]
@@ -134,7 +156,8 @@ export default function ArbitragePage() {
       case 'slots-state': setSlots(msg.slots); break;
       case 'slot-updated':
         setSlots((prev) => prev.map((s) => (s.slotId === msg.slot.slotId ? msg.slot : s)));
-        if (msg.slot.cameraConnected && !msg.slot.arbitreConnected) webrtcRef.current.connectToSlot(msg.slot.slotId);
+        // ensureConnected : ne renégocie que si aucune connexion vivante n'existe pour ce slot
+        if (msg.slot.cameraConnected) webrtcRef.current.ensureConnected(msg.slot.slotId);
         break;
       case 'relay-offer': webrtcRef.current.handleOffer(msg.slotId, msg.sdp); break;
       case 'relay-ice': if (msg.from === 'camera') webrtcRef.current.handleIceCandidate(msg.slotId, msg.candidate); break;
@@ -142,17 +165,89 @@ export default function ArbitragePage() {
     }
   }, []);
 
+  // ============ Auto-réparation des flux ============
+  const markFrozen = useCallback((slotId: SlotId) => {
+    setFrozenSlots((prev) => (prev.has(slotId) ? prev : new Set(prev).add(slotId)));
+  }, []);
+
+  const tryRecover = useCallback((slotId: SlotId, reason: string) => {
+    const last = lastReconnectAt.current.get(slotId) ?? 0;
+    if (Date.now() - last < RECONNECT_COOLDOWN_MS) return;
+    lastReconnectAt.current.set(slotId, Date.now());
+    console.warn(`[VAR] Flux caméra ${slotId} perdu (${reason}) — renégociation`);
+    webrtcRef.current.reconnectSlot(slotId);
+  }, []);
+
+  const onConnectionStateChange = useCallback((slotId: SlotId, state: RTCPeerConnectionState) => {
+    const timers = disconnectTimers.current;
+    if (state === 'connected') {
+      const t = timers.get(slotId);
+      if (t) { clearTimeout(t); timers.delete(slotId); }
+      return;
+    }
+    if (state === 'failed') {
+      markFrozen(slotId);
+      tryRecover(slotId, 'failed');
+      return;
+    }
+    // « disconnected » est souvent transitoire (micro-coupure WiFi) : délai de grâce avant d'agir
+    if (state === 'disconnected' && !timers.has(slotId)) {
+      timers.set(slotId, setTimeout(() => {
+        timers.delete(slotId);
+        const pc = webrtcRef.current.getPeerConnection(slotId);
+        if (pc && pc.connectionState !== 'connected') {
+          markFrozen(slotId);
+          tryRecover(slotId, 'disconnected');
+        }
+      }, DISCONNECT_GRACE_MS));
+    }
+  }, [markFrozen, tryRecover]);
+
   const { send, connected } = useSignaling({ onMessage: handleMessage });
-  const webrtc = useWebRTCArbitre({ send, onTrack });
+  const webrtc = useWebRTCArbitre({ send, onTrack, onConnectionStateChange });
   webrtcRef.current = webrtc;
 
   // Télémétrie WebRTC : santé réseau affichée en direct + latence par caméra pour la synchro VAR
   const { stats: connStats, getStatsSnapshot } = useConnectionStats(webrtc.getPeerConnection);
 
+  // Flux gelé : la connexion se dit établie mais plus aucun octet n'arrive (téléphone rechargé, app en arrière-plan…)
+  useEffect(() => {
+    connStats.forEach((st, slotId) => {
+      const slot = slots.find((x) => x.slotId === slotId);
+      if (!slot?.cameraConnected) return;
+      if (st.stalledPolls >= STALL_POLLS_FROZEN) {
+        markFrozen(slotId);
+        tryRecover(slotId, 'flux gelé');
+      } else if (st.stalledPolls === 0 && st.bitrateKbps > 0 && frozenSlots.has(slotId)) {
+        // Les données sont revenues d'elles-mêmes, sans renégociation
+        setFrozenSlots((prev) => { const next = new Set(prev); next.delete(slotId); return next; });
+      }
+    });
+  }, [connStats, slots, frozenSlots, markFrozen, tryRecover]);
+
+  useEffect(() => () => { disconnectTimers.current.forEach((t) => clearTimeout(t)); }, []);
+
+  // Filet de sécurité : toutes les 10 s, chaque caméra déclarée connectée doit avoir une connexion
+  // vivante (un message de signalisation perdu ne doit pas laisser une tuile noire indéfiniment).
+  // No-op quand tout va bien ; « disconnected » est laissé au délai de grâce ci-dessus.
+  const slotsRef = useRef<SlotState[]>([]);
+  useEffect(() => { slotsRef.current = slots; }, [slots]);
+  useEffect(() => {
+    const id = setInterval(() => {
+      for (const slot of slotsRef.current) {
+        if (!slot.cameraConnected) continue;
+        const pc = webrtcRef.current.getPeerConnection(slot.slotId);
+        if (pc?.connectionState === 'disconnected') continue;
+        webrtcRef.current.ensureConnected(slot.slotId);
+      }
+    }, 10000);
+    return () => clearInterval(id);
+  }, []);
+
   useEffect(() => { if (connected) send({ type: 'arbitre-join' }); }, [connected, send]);
   useEffect(() => {
     for (const slot of slots) {
-      if (slot.cameraConnected && !slot.arbitreConnected) webrtc.connectToSlot(slot.slotId);
+      if (slot.cameraConnected) webrtc.ensureConnected(slot.slotId);
     }
   }, [slots]);
 
@@ -218,6 +313,7 @@ export default function ArbitragePage() {
     // Réinitialiser l'analyse IA de la capture précédente
     if (analysisAbortRef.current) analysisAbortRef.current.aborted = true;
     setAnalysisStatus(null);
+    setAnalysisProgress(null);
     setAnalysisSummary(null);
     setImpactMarkers([]);
 
@@ -244,6 +340,7 @@ export default function ArbitragePage() {
     // Stopper une analyse IA en cours
     if (analysisAbortRef.current) analysisAbortRef.current.aborted = true;
     setAnalysisStatus(null);
+    setAnalysisProgress(null);
     setAnalysisSummary(null);
     setImpactMarkers([]);
 
@@ -297,6 +394,7 @@ export default function ArbitragePage() {
 
     if (analysisAbortRef.current) analysisAbortRef.current.aborted = true;
     setAnalysisStatus(null);
+    setAnalysisProgress(null);
     setAnalysisSummary(null);
     setImpactMarkers([]);
 
@@ -331,6 +429,7 @@ export default function ArbitragePage() {
     if (analysisStatus || varBlobs.size === 0) return;
     const abort = { aborted: false };
     analysisAbortRef.current = abort;
+    setAnalysisProgress(0);
     const expected = varDurationMs / 1000;
     const entries = [...varBlobs.entries()];
     const masterSlotId = getMasterEntry()?.[0] ?? entries[0][0];
@@ -343,7 +442,18 @@ export default function ArbitragePage() {
         done++;
         setAnalysisStatus(`Analyse caméra ${done}/${entries.length}…`);
         try {
-          const sig = await extractMotionSignal(url, { expectedDurationSec: expected, abort });
+          const camIndex = done - 1;
+          const sig = await extractMotionSignal(url, {
+            expectedDurationSec: expected,
+            abort,
+            onProgress: (f) => {
+              // ~10 mises à jour/s suffisent pour la barre de progression de la timeline
+              const now = performance.now();
+              if (now - lastProgressUpdate.current < 100) return;
+              lastProgressUpdate.current = now;
+              setAnalysisProgress((camIndex + f) / entries.length);
+            },
+          });
           if (sig.times.length > 10) signals.set(slotId, sig);
         } catch {
           // caméra illisible — on continue avec les autres
@@ -405,6 +515,7 @@ export default function ArbitragePage() {
     } finally {
       if (analysisAbortRef.current === abort) {
         setAnalysisStatus(null);
+        setAnalysisProgress(null);
         analysisAbortRef.current = null;
       }
     }
@@ -521,6 +632,15 @@ export default function ArbitragePage() {
     seekTo(timeMs / 1000);
   }, [seekTo]);
 
+  // Navigation par impacts : saute au marqueur IA suivant / précédent (boutons ◆ et Maj+←/→)
+  const goToImpact = useCallback((direction: 1 | -1) => {
+    const target = adjacentMarker(impactMarkers, varTimeRef.current * 1000, direction, frameInterval * 1000);
+    if (target === null) return;
+    varVideoRefs.current.forEach((v) => v.pause());
+    setIsPlaying(false);
+    seekTo(target / 1000);
+  }, [impactMarkers, seekTo, frameInterval]);
+
   const handleSpeedChange = useCallback((rate: number) => {
     setPlaybackRate(rate);
     varVideoRefs.current.forEach((v) => { v.playbackRate = rate; });
@@ -549,6 +669,12 @@ export default function ArbitragePage() {
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (!varMode) return;
+      // Maj + flèches : impact précédent / suivant
+      if (e.shiftKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+        goToImpact(e.key === 'ArrowRight' ? 1 : -1);
+        e.preventDefault();
+        return;
+      }
       switch (e.key) {
         case 'ArrowRight': stepForward(1); e.preventDefault(); break;
         case 'ArrowLeft': stepBackward(1); e.preventDefault(); break;
@@ -568,7 +694,7 @@ export default function ArbitragePage() {
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [varMode, expandedSlot, stepForward, stepBackward, togglePlayPause, handleSpeedChange, pauseAll, exitVarMode, runAnalysis]);
+  }, [varMode, expandedSlot, stepForward, stepBackward, togglePlayPause, handleSpeedChange, pauseAll, exitVarMode, runAnalysis, goToImpact]);
 
   // Recording toggle
   const handleRecordToggle = useCallback(async () => {
@@ -590,42 +716,65 @@ export default function ArbitragePage() {
   const isLiveGrid = !varMode && !expandedSlot;
   const isLiveExpanded = !varMode && expandedSlot !== null;
 
-  const renderVarControls = () => (
-    <div style={{
-      padding: '8px 12px', background: 'var(--bg-surface)', borderTop: '1px solid var(--border)',
-      display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center', gap: 8, flexShrink: 0,
-    }}>
-      <div className="flex items-center gap-2">
-        <button className="btn" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => stepBackward(10)}>{'\u25C0\u25C0'} -10</button>
-        <button className="btn" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => stepBackward(1)}>{'\u25C0'} -1</button>
-        <button className="btn" style={{ padding: '6px 16px', fontSize: '0.9rem' }} onClick={togglePlayPause}>{isPlaying ? '\u23F8' : '\u25B6'}</button>
-        <button className="btn" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => stepForward(1)}>+1 {'\u25B6'}</button>
-        <button className="btn" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={() => stepForward(10)}>+10 {'\u25B6\u25B6'}</button>
-      </div>
-      <div className="font-mono text-cyan" style={{ fontSize: '0.85rem' }}>{currentFrame} / {totalFrames}</div>
-      <div className="flex items-center gap-2">
-        {[0.1, 0.25, 0.5, 1].map((rate) => (
-          <button key={rate} className={`speed-btn ${playbackRate === rate ? 'active' : ''}`}
-            style={{ padding: '4px 8px', fontSize: '0.75rem' }} onClick={() => handleSpeedChange(rate)}>{rate}x</button>
-        ))}
-      </div>
-      <button
-        className="btn"
-        onClick={runAnalysis}
-        disabled={!!analysisStatus}
-        title="Détecte les impacts probables (marqueurs timeline) et resynchronise les caméras (touche A)"
-        style={{ padding: '6px 12px', fontSize: '0.8rem', borderColor: '#ffb02066', color: '#ffb020' }}
-      >
-        {analysisStatus ?? '⚡ ANALYSE IA'}
-      </button>
-      {analysisSummary && (
-        <span className="font-mono" style={{ fontSize: '0.75rem', color: '#ffb020' }}>{analysisSummary}</span>
-      )}
-      <button className="btn-live" onClick={exitVarMode} style={{ padding: '8px 20px', fontSize: '0.85rem', marginLeft: 8 }}>
-        REPRENDRE LE LIVE
-      </button>
-    </div>
+  // GO/NO-GO : synthèse de l'état des caméras et des buffers avant un assaut
+  const readiness = computeReadiness(
+    slots.map((s) => {
+      const st = connStats.get(s.slotId);
+      return {
+        slotId: s.slotId,
+        name: s.name,
+        cameraConnected: s.cameraConnected,
+        health: st ? getHealth(st) : undefined,
+        frozen: frozenSlots.has(s.slotId),
+        bufferMs: bufferDurations.get(s.slotId) ?? 0,
+      };
+    }),
+    { bufferTargetMs: getBufferDurationSec() * 1000, bufferPaused }
   );
+
+  const impactIndex = currentMarkerIndex(impactMarkers, currentTimeDisplay * 1000, frameInterval * 1000);
+
+  // Commandes VAR : cibles ≥ 48 px, groupées (transport · impacts · vitesse · analyse)
+  const renderVarControls = () => {
+    const impactCount = impactMarkers.length;
+    const analysing = analysisStatus !== null;
+    return (
+      <div className="var-controls">
+        <div className="var-group">
+          <button className="var-ctl" onClick={() => stepBackward(10)} title="−10 images (↓)">{'\u25C0\u25C0'} 10</button>
+          <button className="var-ctl" onClick={() => stepBackward(1)} title="−1 image (←)">{'\u25C0'} 1</button>
+          <button className="var-ctl primary" onClick={togglePlayPause} title="Lecture / Pause (Espace)">{isPlaying ? '\u23F8' : '\u25B6'}</button>
+          <button className="var-ctl" onClick={() => stepForward(1)} title="+1 image (→)">1 {'\u25B6'}</button>
+          <button className="var-ctl" onClick={() => stepForward(10)} title="+10 images (↑)">10 {'\u25B6\u25B6'}</button>
+        </div>
+        <div className="var-frame font-mono">{currentFrame} / {totalFrames}</div>
+        <div className="var-group">
+          <button className="var-ctl impact" disabled={impactCount === 0} onClick={() => goToImpact(-1)} title="Impact précédent (Maj + ←)">{'\u25C0'} ◆</button>
+          <span className="var-impact-count font-mono">
+            {impactCount > 0 ? `impact ${impactIndex >= 0 ? impactIndex + 1 : '–'} / ${impactCount}` : 'aucun impact'}
+          </span>
+          <button className="var-ctl impact" disabled={impactCount === 0} onClick={() => goToImpact(1)} title="Impact suivant (Maj + →)">◆ {'\u25B6'}</button>
+        </div>
+        <div className="var-group">
+          {[0.1, 0.25, 0.5, 1].map((rate) => (
+            <button key={rate} className={`speed-btn lg ${playbackRate === rate ? 'active' : ''}`} onClick={() => handleSpeedChange(rate)} title={`Vitesse ${rate}x`}>{rate}x</button>
+          ))}
+        </div>
+        <button
+          className="var-ctl analyse"
+          onClick={runAnalysis}
+          disabled={analysing}
+          title="Détecte les impacts probables (marqueurs timeline) et resynchronise les caméras (touche A)"
+        >
+          {analysing ? `⏳ ${Math.round((analysisProgress ?? 0) * 100)} %` : '⚡ ANALYSE IA'}
+        </button>
+        {analysisSummary && <span className="var-summary font-mono">{analysisSummary}</span>}
+        <button className="btn-live var-ctl-live" onClick={exitVarMode} title="Retour au direct (Échap)">
+          REPRENDRE LE LIVE
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -652,16 +801,19 @@ export default function ArbitragePage() {
 
       {/* ============ LIVE GRID ============ */}
       {isLiveGrid && (
-        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gridTemplateRows: 'repeat(2, 1fr)', gap: 4, padding: 4, minHeight: 0 }}>
+        <>
+          <ReadinessBanner readiness={readiness} />
+          <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gridTemplateRows: 'repeat(2, 1fr)', gap: 4, padding: 4, minHeight: 0 }}>
           {slots.map((slot) => (
-            <CameraTile key={slot.slotId} slot={slot} stream={streams.get(slot.slotId) || null} selected={false} onClick={() => setExpandedSlot(slot.slotId)} connectionStats={connStats.get(slot.slotId)} />
+            <CameraTile key={slot.slotId} slot={slot} stream={streams.get(slot.slotId) || null} selected={false} onClick={() => setExpandedSlot(slot.slotId)} connectionStats={connStats.get(slot.slotId)} frozen={frozenSlots.has(slot.slotId)} />
           ))}
           {slots.length === 0 && (
             <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontFamily: 'var(--font-ui)', textTransform: 'uppercase' }}>
               En attente... <a href="/setup" style={{ color: 'var(--cyan)', marginLeft: 8 }}>Page setup</a>
             </div>
           )}
-        </div>
+          </div>
+        </>
       )}
 
       {/* ============ LIVE EXPANDED ============ */}
@@ -750,13 +902,13 @@ export default function ArbitragePage() {
                         cursor: 'default',
                       }}
                     >
-                      <button className="btn" style={{ padding: '0 6px', fontSize: '0.7rem' }}
+                      <button className="btn nudge-btn"
                         title="Retarder cette caméra d'une frame"
                         onClick={() => nudgeCamera(slot.slotId, -1)}>−1f</button>
                       <span className="font-mono" style={{ fontSize: '0.65rem', color: 'var(--text-muted)', minWidth: 44, textAlign: 'center' }}>
                         {Math.round((varOffsets.get(slot.slotId) || 0) * 1000)}ms
                       </span>
-                      <button className="btn" style={{ padding: '0 6px', fontSize: '0.7rem' }}
+                      <button className="btn nudge-btn"
                         title="Avancer cette caméra d'une frame"
                         onClick={() => nudgeCamera(slot.slotId, 1)}>+1f</button>
                     </div>
@@ -780,7 +932,7 @@ export default function ArbitragePage() {
 
           {/* Timeline */}
           <div style={{ padding: '4px 12px', flexShrink: 0 }}>
-            <VarTimeline durationMs={varDurationMs} currentTimeMs={currentTimeDisplay * 1000} fps={fps} onSeek={handleSeek} markers={impactMarkers} />
+            <VarTimeline durationMs={varDurationMs} currentTimeMs={currentTimeDisplay * 1000} fps={fps} onSeek={handleSeek} markers={impactMarkers} analysisProgress={analysisProgress} />
           </div>
 
           {/* Controls */}

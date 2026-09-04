@@ -8,11 +8,13 @@ interface CameraTileProps {
   selected: boolean;
   onClick: () => void;
   connectionStats?: ConnectionStats;
+  /** flux perdu / gelé : overlay + bordure rouge pulsée (reconnexion automatique en cours) */
+  frozen?: boolean;
 }
 
 const HEALTH_COLORS = { good: '#22c55e', degraded: '#ff8c00', bad: '#ff3b3b' } as const;
 
-export default function CameraTile({ slot, stream, selected, onClick, connectionStats }: CameraTileProps) {
+export default function CameraTile({ slot, stream, selected, onClick, connectionStats, frozen }: CameraTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [stats, setStats] = useState<{ w: number; h: number; fps: number } | null>(null);
 
@@ -46,7 +48,7 @@ export default function CameraTile({ slot, stream, selected, onClick, connection
   }, [stream]);
 
   const statusClass = slot.cameraConnected ? 'connected' : 'offline';
-  const tileClass = `camera-tile ${statusClass} ${selected ? 'selected' : ''}`;
+  const tileClass = `camera-tile ${statusClass} ${selected ? 'selected' : ''} ${frozen ? 'frozen' : ''}`;
 
   return (
     <div className={tileClass} onClick={onClick} style={{ cursor: 'pointer' }}>
@@ -59,6 +61,12 @@ export default function CameraTile({ slot, stream, selected, onClick, connection
       )}
       <div className="label">{slot.name}</div>
       <div className={`status-dot ${slot.cameraConnected ? 'live' : 'offline'}`} />
+      {frozen && (
+        <div className="tile-frozen-overlay">
+          <div>⚠ Flux perdu</div>
+          <div className="sub">Reconnexion automatique en cours…</div>
+        </div>
+      )}
       {/* Stream info overlay — stats réseau WebRTC si dispo, sinon réglages du track */}
       {connectionStats ? (
         <div style={{
@@ -69,7 +77,7 @@ export default function CameraTile({ slot, stream, selected, onClick, connection
           alignItems: 'center',
           gap: 5,
           fontFamily: 'var(--font-mono)',
-          fontSize: '0.6rem',
+          fontSize: '0.75rem',
           color: 'var(--text-muted)',
           background: '#000000aa',
           padding: '1px 5px',
@@ -94,7 +102,7 @@ export default function CameraTile({ slot, stream, selected, onClick, connection
           bottom: 6,
           right: 6,
           fontFamily: 'var(--font-mono)',
-          fontSize: '0.6rem',
+          fontSize: '0.75rem',
           color: 'var(--text-muted)',
           background: '#000000aa',
           padding: '1px 5px',

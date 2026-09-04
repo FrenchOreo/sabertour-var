@@ -50,6 +50,7 @@ Outil de vidéo-arbitrage pour le sabre laser sportif. Auto-hébergé, fonctionn
 | Espace | Play/Pause |
 | 1/2/3/4 | Vitesse 1x / 0.5x / 0.25x / 0.1x |
 | A | Analyse IA (marqueurs d'impacts + synchro auto) |
+| Maj + ← → | Impact précédent / suivant |
 | Escape | Reprendre le live |
 
 ### Analyse IA et synchro (mode VAR)
@@ -57,9 +58,14 @@ Outil de vidéo-arbitrage pour le sabre laser sportif. Auto-hébergé, fonctionn
 - **⚡ ANALYSE IA** (ou touche `A`) : détecte les impacts probables et les marque
   en orange sur la timeline (le clic s'aimante dessus), puis resynchronise
   automatiquement les caméras entre elles par corrélation du mouvement.
+- **◆ précédent / suivant** (ou `Maj + ←/→`) : saute d'un impact à l'autre, le
+  compteur indique « impact 2 / 5 ».
 - **−1f / +1f** sur chaque tuile : recalage manuel d'une caméra à la frame près.
-- En direct, chaque tuile affiche un point de santé réseau (vert/orange/rouge)
-  avec débit, fps et perte de paquets — tout doit être vert avant le combat.
+- En direct, le **bandeau GO/NO-GO** au-dessus de la grille résume l'état :
+  **✅ PRÊT** (lancer l'assaut), **⚠** (dégradé ou buffer en cours), **⛔** (flux perdu,
+  caméra hors ligne). Chaque tuile garde son point de santé (débit, fps, perte).
+- **Flux perdu** : une tuile « ⚠ Flux perdu » se reconnecte toute seule en quelques
+  secondes (renégociation automatique) — sans effacer les buffers des autres caméras.
 - Détails et feuille de route : [docs/DETECTION-IA.md](docs/DETECTION-IA.md)
 
 ### Qualité vidéo instable ? Commencer par le matériel
@@ -77,7 +83,8 @@ téléphones sur secteur, et le réglage 60 fps (Paramètres → Fluidité camé
 | Caméra qui ne s'ouvre pas (iPhone) | Réglages → Safari → Caméra → Autoriser |
 | Image floue ou caméra frontale | Appuyer "↕ Retourner" sur la page du téléphone |
 | Le ralenti ne fonctionne pas | Attendre 30s après connexion (buffer en cours) |
-| Écran du téléphone qui s'éteint | Garder l'écran allumé manuellement (paramètres) |
+| Écran du téléphone qui s'éteint | Le verrou d'écran est redemandé automatiquement ; sinon désactiver la mise en veille |
+| Tuile « Flux perdu » | Reconnexion automatique en ~5 s ; si elle persiste, recharger la page du téléphone |
 
 ## Architecture
 

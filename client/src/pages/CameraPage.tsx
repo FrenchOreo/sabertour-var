@@ -36,12 +36,43 @@ async function getCameraStream(): Promise<MediaStream> {
   throw new Error('Aucune caméra accessible');
 }
 
-async function requestWakeLock(): Promise<void> {
-  try {
-    if ('wakeLock' in navigator) {
-      await (navigator as any).wakeLock.request('screen');
-    }
-  } catch {}
+interface WakeLockSentinelLike {
+  released: boolean;
+  release: () => Promise<void>;
+  addEventListener: (type: string, cb: () => void) => void;
+}
+
+/**
+ * Garde l'écran du téléphone allumé. Le verrou est perdu dès que la page passe en
+ * arrière-plan (changement d'app, écran éteint) : on le redemande à chaque retour
+ * au premier plan — sinon l'écran s'éteint définitivement au premier écart.
+ */
+function useWakeLock(): void {
+  const sentinelRef = useRef<WakeLockSentinelLike | null>(null);
+  useEffect(() => {
+    const request = async () => {
+      try {
+        if (!('wakeLock' in navigator)) return;
+        if (sentinelRef.current && !sentinelRef.current.released) return;
+        const sentinel: WakeLockSentinelLike = await (navigator as any).wakeLock.request('screen');
+        sentinelRef.current = sentinel;
+        sentinel.addEventListener('release', () => {
+          if (sentinelRef.current === sentinel) sentinelRef.current = null;
+        });
+      } catch {
+        // refusé (batterie faible, page cachée) — on réessaiera au prochain retour au premier plan
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') request();
+    };
+    request();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      sentinelRef.current?.release().catch(() => {});
+    };
+  }, []);
 }
 
 export default function CameraPage() {
@@ -54,9 +85,19 @@ export default function CameraPage() {
   const [slotName, setSlotName] = useState('');
   const [stream, setStream] = useState<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  useWakeLock();
 
   // Store webrtc functions in refs so handleMessage always uses latest
   const webrtcRef = useRef<ReturnType<typeof useWebRTCCamera>>(null!);
+
+  // Si le système coupe la caméra (autre app, appel entrant), on la réacquiert
+  // automatiquement. Note : track.stop() appelé par nous ne déclenche pas 'ended'.
+  const restartStreamRef = useRef<() => Promise<void>>(async () => {});
+  const watchTrackEnd = useCallback((s: MediaStream) => {
+    const track = s.getVideoTracks()[0];
+    if (!track) return;
+    track.addEventListener('ended', () => { restartStreamRef.current(); }, { once: true });
+  }, []);
 
   const handleMessage = useCallback(
     (msg: WsMessage) => {
@@ -95,7 +136,9 @@ export default function CameraPage() {
 
   const { send, connected } = useSignaling({ onMessage: handleMessage });
 
-  const webrtc = useWebRTCCamera({ slotId, stream, send });
+  // État de la connexion WebRTC vers l'arbitre (affichage « reconnexion » ; l'auto-réparation est dans le hook)
+  const [rtcState, setRtcState] = useState<RTCPeerConnectionState>('new');
+  const webrtc = useWebRTCCamera({ slotId, stream, send, onStateChange: setRtcState });
   webrtcRef.current = webrtc;
 
   // Get camera and join
@@ -111,6 +154,7 @@ export default function CameraPage() {
     getCameraStream()
       .then((s) => {
         setStream(s);
+        watchTrackEnd(s);
         if (videoRef.current) {
           videoRef.current.srcObject = s;
         }
@@ -121,7 +165,6 @@ export default function CameraPage() {
         setErrorMsg(e.message);
       });
 
-    requestWakeLock();
   }, [slotId, token]);
 
   // Join when connected
@@ -146,6 +189,7 @@ export default function CameraPage() {
       }
       stream?.getTracks().forEach((t) => t.stop());
       setStream(s);
+      watchTrackEnd(s);
       setFacingMode(newMode);
       if (videoRef.current) {
         videoRef.current.srcObject = s;
@@ -163,9 +207,11 @@ export default function CameraPage() {
       const s = await getCameraStream();
       stream?.getTracks().forEach((t) => t.stop());
       setStream(s);
+      watchTrackEnd(s);
       if (videoRef.current) videoRef.current.srcObject = s;
     } catch {}
   };
+  restartStreamRef.current = restartStream;
 
   const handleResolutionChange = async (newRes: Resolution) => {
     setResolution(newRes);
@@ -188,7 +234,10 @@ export default function CameraPage() {
     error: { color: 'var(--red)', text: `ERREUR`, animate: false },
   };
 
-  const currentStatus = statusConfig[status];
+  // Connexion WebRTC perdue alors que le serveur nous voit « live » : afficher la reconnexion en cours
+  const displayStatus: CameraStatus =
+    status === 'live' && (rtcState === 'disconnected' || rtcState === 'failed') ? 'reconnecting' : status;
+  const currentStatus = statusConfig[displayStatus];
 
   return (
     <div
@@ -231,7 +280,7 @@ export default function CameraPage() {
             borderRadius: '50%',
             background: currentStatus.color,
             margin: '0 auto 16px',
-            animation: status === 'live' ? 'blink 1.5s infinite' : currentStatus.animate ? 'blink 1s infinite' : 'none',
+            animation: displayStatus === 'live' ? 'blink 1.5s infinite' : currentStatus.animate ? 'blink 1s infinite' : 'none',
           }}
         />
 
