@@ -26,9 +26,10 @@ where ffmpeg >nul 2>&1 && (
   echo   Pour activer: winget install Gyan.FFmpeg
 )
 
-if not exist "server\node_modules" (echo Installation serveur... & cd server & npm install --silent & cd ..)
-if not exist "client\node_modules" (echo Installation client...  & cd client & npm install --silent & cd ..)
-if not exist "client\dist"         (echo Build interface...      & cd client & npm run build --silent & cd ..)
+rem "call" obligatoire : npm est un .cmd, sans call le script s arrete apres la premiere installation
+if not exist "server\node_modules" (echo Installation serveur... & cd server & call npm install --silent & cd ..)
+if not exist "client\node_modules" (echo Installation client...  & cd client & call npm install --silent & cd ..)
+if not exist "client\dist"         (echo Build interface...      & cd client & call npm run build --silent & cd ..)
 
 echo.
 echo Demarrage...
