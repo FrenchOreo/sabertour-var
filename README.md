@@ -104,9 +104,13 @@ Fabriquer l'application localement : `npm install` puis `npm run build:app:mac` 
 
 ### Analyse IA et synchro (mode VAR)
 
-- **⚡ ANALYSE IA** (ou touche `A`) : détecte les impacts probables et les marque
-  en orange sur la timeline (le clic s'aimante dessus), puis resynchronise
-  automatiquement les caméras entre elles par corrélation du mouvement.
+- **Analyse IA automatique** : dès l'appui sur VAR, l'app mesure l'intensité du
+  mouvement dans les images et la dessine en **courbe orange** sur la timeline (on voit
+  où l'action se passe), marque les **pics brusques ◆** (touche, parade ou clash — le
+  clic s'aimante dessus) et resynchronise les caméras entre elles. Elle ne juge pas :
+  elle pointe les moments à regarder. Touche `A` ou « Relancer l'analyse » pour refaire.
+- La **durée de la timeline est mesurée sur la vidéo réelle** (et plus estimée) : la
+  barre et le compteur d'images correspondent exactement au replay.
 - **◆ précédent / suivant** (ou `Maj + ←/→`) : saute d'un impact à l'autre, le
   compteur indique « impact 2 / 5 ».
 - **−1f / +1f** sur chaque tuile : recalage manuel d'une caméra à la frame près.

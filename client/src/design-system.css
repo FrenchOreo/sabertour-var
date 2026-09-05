@@ -399,3 +399,12 @@ html, body, #root {
   pointer-events: none;
 }
 .tile-frozen-overlay .sub { font-size: 0.8rem; color: var(--text-muted); letter-spacing: 0.05em; text-transform: none; }
+
+/* Légende de l'analyse IA sous la timeline */
+.var-legend {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding: 3px 4px 0;
+}
+.var-legend b { color: #ffb020; font-weight: 600; }

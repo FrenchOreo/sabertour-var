@@ -9,6 +9,8 @@ interface VarTimelineProps {
   markers?: number[];
   /** Progression de l'analyse IA en cours (0..1) ; null/undefined si aucune analyse */
   analysisProgress?: number | null;
+  /** Courbe d'intensité du mouvement (valeurs 0..1 réparties sur toute la durée) */
+  curve?: Float32Array | null;
 }
 
 const MARKER_SNAP_PX = 10;
@@ -34,6 +36,7 @@ export default function VarTimeline({
   onSeek,
   markers,
   analysisProgress,
+  curve,
 }: VarTimelineProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -67,6 +70,30 @@ export default function VarTimeline({
     // Zone écoulée
     ctx.fillStyle = '#00d4ff14';
     ctx.fillRect(0, trackTop, progress * w, h - trackTop);
+
+    // Courbe d'intensité du mouvement (analyse IA) : on voit où ça se passe avant même les pics
+    if (curve && curve.length > 1) {
+      const baseY = h - 6;
+      const maxH = (h - trackTop) * 0.7;
+      const xAt = (i: number) => (i / (curve.length - 1)) * w;
+      ctx.beginPath();
+      ctx.moveTo(0, baseY);
+      for (let i = 0; i < curve.length; i++) ctx.lineTo(xAt(i), baseY - curve[i] * maxH);
+      ctx.lineTo(w, baseY);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255, 176, 32, 0.22)';
+      ctx.fill();
+      ctx.beginPath();
+      for (let i = 0; i < curve.length; i++) {
+        const x = xAt(i);
+        const y = baseY - curve[i] * maxH;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = 'rgba(255, 176, 32, 0.6)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
 
     // Graduations temporelles
     const pxPerMs = w / durationMs;
@@ -166,7 +193,7 @@ export default function VarTimeline({
     ctx.lineTo(cursorX, 20);
     ctx.closePath();
     ctx.fill();
-  }, [durationMs, currentTimeMs, markers, analysisProgress, frameMs]);
+  }, [durationMs, currentTimeMs, markers, analysisProgress, curve, frameMs]);
 
   useEffect(() => {
     draw();
