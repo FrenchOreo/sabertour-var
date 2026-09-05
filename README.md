@@ -15,6 +15,25 @@ Outil de vidéo-arbitrage pour le sabre laser sportif. Auto-hébergé, fonctionn
 2. Double-cliquer `start.bat` (Windows) ou `./start.sh` (Mac/Linux)
 3. L'interface de configuration s'ouvre automatiquement
 
+## Mise à jour
+
+Double-cliquer `update.bat` (Windows) ou lancer `./update.sh` (Mac/Linux), puis relancer
+`start.bat` / `start.sh`. Le script récupère la dernière version depuis GitHub, **supprime
+l'ancien build** (sans ça `start.*` garde l'ancienne interface : il ne reconstruit que si
+`client/dist` est absent) et réinstalle les dépendances.
+
+Première installation sur un nouvel ordinateur :
+
+```
+git clone https://github.com/FrenchOreo/sabertour-var.git
+cd sabertour-var
+start.bat        # ou ./start.sh
+```
+
+Application Electron (installateur) : `npm install` puis `npm run build:app:win` ou
+`npm run build:app:mac` → l'installateur est généré dans `release/`. Les releases publiées
+sur GitHub ne sont pas régénérées automatiquement : celle en ligne peut être en retard sur `main`.
+
 ## Guide bénévoles — Système VAR Saber Tour
 
 ### Mise en place (avant le tournoi)
