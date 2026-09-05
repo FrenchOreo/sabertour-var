@@ -1,6 +1,6 @@
 {
   "name": "saber-var",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Système VAR pour Saber Tour — Vidéo arbitrage sabre laser",
   "main": "electron/main.js",
   "scripts": {
@@ -32,7 +32,10 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ],
       "artifactName": "SABER-VAR-${version}-mac-${arch}.${ext}",
