@@ -2,20 +2,50 @@
 
 Outil de vidéo-arbitrage pour le sabre laser sportif. Auto-hébergé, fonctionne en WiFi local sans internet.
 
-## Prérequis
+## Installation simple (application Mac / Windows) — recommandé
+
+Aucun terminal, aucun Node.js à installer.
+
+1. Ouvrir la page des versions : https://github.com/FrenchOreo/sabertour-var/releases/latest
+2. Télécharger le fichier correspondant à l'ordinateur :
+
+   | Ordinateur | Fichier |
+   |---|---|
+   | Mac puce Apple (M1, M2, M3, M4) | `SABER-VAR-<version>-mac-arm64.dmg` |
+   | Mac Intel | `SABER-VAR-<version>-mac-x64.dmg` |
+   | Windows | `SABER-VAR-<version>-windows-setup.exe` |
+
+3. **Mac** : ouvrir le `.dmg`, glisser SABER VAR dans Applications, lancer.
+   Au premier lancement, macOS peut refuser (« développeur non identifié ») : Réglages
+   Système → Confidentialité et sécurité → bouton **« Ouvrir quand même »**, une seule fois.
+   Sur les macOS plus anciens : clic droit sur l'app → Ouvrir.
+   **Windows** : lancer le `.exe`, l'installation est automatique.
+
+**Mise à jour** : l'application vérifie au démarrage (quand il y a internet) si une nouvelle
+version existe et propose **« Télécharger »**. Sur Mac, glisser la nouvelle app dans Applications
+en remplaçant l'ancienne ; sur Windows, lancer l'installateur. Menu *SABER VAR* (Mac) ou *Aide*
+(Windows) → « Vérifier les mises à jour… » pour forcer la vérification.
+
+**Publier une nouvelle version** (responsable du projet) : onglet *Actions* → *Release* →
+*Run workflow* → choisir `patch` (correctif) ou `minor` (nouveautés). Dix minutes plus tard la
+release est en ligne avec les trois fichiers, et les applications installées la proposeront.
+
+## Installation depuis les sources (développeurs)
+
+### Prérequis
 
 - **Node.js 18+** : https://nodejs.org
 - **ffmpeg** (optionnel, pour export) :
   - macOS : `brew install ffmpeg`
   - Windows : `winget install Gyan.FFmpeg`
 
-## Démarrage
+### Démarrage
 
 1. **Connecter l'ordinateur au routeur WiFi du tournoi**
 2. Double-cliquer `start.bat` (Windows) ou `./start.sh` (Mac/Linux)
 3. L'interface de configuration s'ouvre automatiquement
 
-## Mise à jour
+### Mise à jour
 
 Double-cliquer `update.bat` (Windows) ou lancer `./update.sh` (Mac/Linux), puis relancer
 `start.bat` / `start.sh`. Le script récupère la dernière version depuis GitHub, **supprime
@@ -30,9 +60,9 @@ cd sabertour-var
 start.bat        # ou ./start.sh
 ```
 
-Application Electron (installateur) : `npm install` puis `npm run build:app:win` ou
-`npm run build:app:mac` → l'installateur est généré dans `release/`. Les releases publiées
-sur GitHub ne sont pas régénérées automatiquement : celle en ligne peut être en retard sur `main`.
+Fabriquer l'application localement : `npm install` puis `npm run build:app:mac` ou
+`npm run build:app:win` → fichiers dans `release/`. En pratique, préférer le workflow *Release*
+(onglet Actions) qui fabrique Mac + Windows et publie la release automatiquement.
 
 ## Guide bénévoles — Système VAR Saber Tour
 
