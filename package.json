@@ -21,17 +21,27 @@
     "files": [
       "electron/**/*",
       "client/dist/**/*",
-      "shared/**/*"
+      "shared/**/*",
+      "scripts/afterPack.js"
     ],
     "directories": {
       "output": "release"
     },
+    "afterPack": "scripts/afterPack.js",
     "mac": {
-      "target": "dmg",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "artifactName": "SABER-VAR-${version}-mac-${arch}.${ext}",
+      "category": "public.app-category.sports",
       "icon": null
     },
     "win": {
       "target": "nsis",
+      "artifactName": "SABER-VAR-${version}-windows-setup.${ext}",
       "icon": null
     },
     "linux": {

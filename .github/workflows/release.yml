@@ -1,0 +1,119 @@
+# Fabrique l'application SABER VAR (Mac + Windows) et publie une release GitHub.
+#
+# Déclenchement : onglet Actions → « Release » → « Run workflow » → choisir patch / minor / major.
+# ~10 min plus tard, la release est en ligne avec :
+#   - SABER-VAR-<version>-mac-arm64.dmg   (Mac puce Apple M1/M2/M3/M4)
+#   - SABER-VAR-<version>-mac-x64.dmg     (Mac Intel)
+#   - SABER-VAR-<version>-windows-setup.exe
+# L'application installée détecte la nouvelle version au démarrage et propose « Télécharger ».
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Type de version (patch = correctif, minor = nouveautés, major = rupture)'
+        type: choice
+        required: true
+        default: minor
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Numéro de version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Incrémenter la version et créer le tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version ${{ inputs.bump }} -m "release: v%s"
+          git push --follow-tags origin HEAD:main
+      - id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: bump
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            args: --mac
+          - name: Windows
+            os: windows-latest
+            args: --win
+    runs-on: ${{ matrix.os }}
+    env:
+      # Pas de certificat Apple Developer : ne pas chercher d'identité de signature
+      # (l'app est signée « ad hoc » par scripts/afterPack.js, obligatoire sur Apple Silicon)
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.bump.outputs.version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Dépendances Electron
+        run: npm install
+      - name: Build interface
+        run: npm run build:client
+      - name: Empaqueter l'application
+        run: npx electron-builder ${{ matrix.args }} --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.blockmap
+            release/latest*.yml
+
+  publish:
+    name: Publier la release
+    needs: [bump, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Créer la release GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.bump.outputs.version }}
+          name: SABER VAR ${{ needs.bump.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            ## Installation
+
+            | Ordinateur | Fichier à télécharger |
+            |---|---|
+            | Mac puce Apple (M1, M2, M3, M4) | `SABER-VAR-${{ needs.bump.outputs.version }}-mac-arm64.dmg` |
+            | Mac Intel | `SABER-VAR-${{ needs.bump.outputs.version }}-mac-x64.dmg` |
+            | Windows | `SABER-VAR-${{ needs.bump.outputs.version }}-windows-setup.exe` |
+
+            **Mac, premier lancement** : ouvrir le `.dmg`, glisser SABER VAR dans Applications.
+            Si macOS refuse d'ouvrir l'app (« développeur non identifié ») : Réglages Système →
+            Confidentialité et sécurité → bouton **« Ouvrir quand même »** (une seule fois).
+            Sur les macOS plus anciens : clic droit sur l'app → Ouvrir.
+
+            **Mise à jour** : l'application vous prévient au démarrage et propose « Télécharger ».
+            Remplacez l'ancienne app par la nouvelle dans Applications, c'est tout.
