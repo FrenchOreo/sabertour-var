@@ -135,6 +135,9 @@ export function estimateOffsetSec(a: MotionSignal, b: MotionSignal, opts: Offset
   return refined * dt;
 }
 
+/** En dessous de ce rapport max/médiane, le signal est considéré plat (aucun impact) */
+export const FLAT_SIGNAL_RATIO = 2.5;
+
 export interface SpikeOptions {
   /** pas de la grille en secondes (défaut 0.05) */
   dt?: number;
@@ -173,6 +176,10 @@ export function findImpactSpikes(sig: MotionSignal, opts: SpikeOptions = {}): nu
 
   const sorted = Array.from(v).sort((x, y) => x - y);
   const median = sorted[Math.floor(n / 2)];
+  const max = sorted[n - 1];
+  // Scène sans action (caméra statique, bruit de capteur) : le « plus fort » n'est que du
+  // bruit, on n'invente pas de pics. Un impact réel dépasse largement le mouvement médian.
+  if (median <= 0 || max < FLAT_SIGNAL_RATIO * median) return [];
   const absDev = sorted.map((x) => Math.abs(x - median)).sort((x, y) => x - y);
   const mad = absDev[Math.floor(n / 2)];
   const scale = 1.4826 * mad + 1e-9;
@@ -198,6 +205,36 @@ export function findImpactSpikes(sig: MotionSignal, opts: SpikeOptions = {}): nu
   return kept
     .map((idx) => uni.start + idx * dt)
     .sort((a, b) => a - b);
+}
+
+/**
+ * Courbe d'intensité du mouvement affichable sur la timeline : `bins` cases entre 0 et
+ * `durationSec`, valeur max par case, normalisée sur le 95e percentile (0..1) pour qu'un
+ * unique pic énorme n'écrase pas le reste. Les cases sans échantillon reprennent la
+ * valeur précédente (l'échantillonnage à 8× est plus lâche que la grille).
+ */
+export function buildDisplayCurve(sig: MotionSignal, durationSec: number, bins = 300): Float32Array | null {
+  if (sig.times.length < 2 || durationSec <= 0 || bins < 2) return null;
+  const out = new Float32Array(bins);
+  const filled = new Uint8Array(bins);
+  for (let i = 0; i < sig.times.length; i++) {
+    const t = sig.times[i];
+    if (t < 0 || t > durationSec) continue;
+    const b = Math.min(bins - 1, Math.floor((t / durationSec) * bins));
+    if (!filled[b] || sig.values[i] > out[b]) out[b] = sig.values[i];
+    filled[b] = 1;
+  }
+  let last = 0;
+  for (let b = 0; b < bins; b++) {
+    if (filled[b]) last = out[b];
+    else out[b] = last;
+  }
+  const positive = Array.from(out).filter((v) => v > 0).sort((a, b) => a - b);
+  if (positive.length === 0) return out;
+  const p95 = positive[Math.min(positive.length - 1, Math.floor(positive.length * 0.95))];
+  if (p95 <= 0) return out;
+  for (let b = 0; b < bins; b++) out[b] = Math.min(1, out[b] / p95);
+  return out;
 }
 
 // ==================== Extraction du signal (DOM, non testé unitairement) ====================

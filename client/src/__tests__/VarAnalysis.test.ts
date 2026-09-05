@@ -4,6 +4,7 @@ import {
   zNormalize,
   estimateOffsetSec,
   findImpactSpikes,
+  buildDisplayCurve,
   MotionSignal,
 } from '../lib/varAnalysis';
 
@@ -142,16 +143,52 @@ describe('findImpactSpikes', () => {
     expect(Math.abs(spikes[0] - 5.1)).toBeLessThan(0.35);
   });
 
-  it('returns nothing on a flat signal', () => {
+  it('returns nothing on a flat signal (static camera, sensor noise only)', () => {
     const rng = makeRng(5);
     const sig = sample(() => 0.5 + 0.05 * rng(), 0, 10, 0.05);
-    // du bruit uniforme sans pic net ne doit pas générer des dizaines de marqueurs
+    expect(findImpactSpikes(sig)).toEqual([]);
+  });
+
+  it('still finds spikes on a busy scene with steady motion in between', () => {
+    const rng = makeRng(6);
+    // mouvement continu (médiane ~2) + un impact net (~8) : rapport max/médiane ≈ 4
+    const sig = sample((t) => 2 + 0.3 * rng() + bump(t, 4), 0, 10, 0.05);
     const spikes = findImpactSpikes(sig);
-    expect(spikes.length).toBeLessThanOrEqual(2);
+    expect(spikes.length).toBe(1);
+    expect(Math.abs(spikes[0] - 4)).toBeLessThan(0.15);
   });
 
   it('returns empty array for too-short signals', () => {
     expect(findImpactSpikes({ times: [0], values: [1] })).toEqual([]);
     expect(findImpactSpikes({ times: [], values: [] })).toEqual([]);
+  });
+});
+
+describe('buildDisplayCurve', () => {
+  it('returns one value per bin, normalised to 0..1', () => {
+    const sig: MotionSignal = { times: [0, 1, 2, 3, 4], values: [1, 5, 2, 10, 1] };
+    const curve = buildDisplayCurve(sig, 4, 8);
+    expect(curve).not.toBeNull();
+    expect(curve!.length).toBe(8);
+    for (const v of Array.from(curve!)) {
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(1);
+    }
+    expect(Math.max(...Array.from(curve!))).toBe(1);
+  });
+
+  it('fills bins without samples with the previous value (no holes)', () => {
+    const sig: MotionSignal = { times: [0, 4], values: [4, 4] };
+    const curve = buildDisplayCurve(sig, 4, 8);
+    expect(Array.from(curve!).every((v) => v === 1)).toBe(true);
+  });
+
+  it('ignores samples outside the timeline and rejects degenerate input', () => {
+    const sig: MotionSignal = { times: [-1, 0, 2, 9], values: [100, 1, 1, 100] };
+    const curve = buildDisplayCurve(sig, 4, 4);
+    expect(curve).not.toBeNull();
+    expect(Math.max(...Array.from(curve!))).toBe(1); // le 100 hors plage n'a pas servi de référence
+    expect(buildDisplayCurve({ times: [0], values: [1] }, 4)).toBeNull();
+    expect(buildDisplayCurve(sig, 0)).toBeNull();
   });
 });
