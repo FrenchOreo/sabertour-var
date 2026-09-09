@@ -1,10 +1,11 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCArbitre } from '../hooks/useWebRTC';
 import { useVideoBuffer } from '../hooks/useVideoBuffer';
 import { useRecording } from '../hooks/useRecording';
 import { useConnectionStats, getHealth, STALL_POLLS_FROZEN } from '../hooks/useConnectionStats';
-import { extractMotionSignal, findImpactSpikes, estimateOffsetSec, MotionSignal } from '../lib/varAnalysis';
+import { extractMotionSignal, findImpactSpikes, estimateOffsetSec, buildDisplayCurve, MotionSignal } from '../lib/varAnalysis';
+import { probeBlobDuration } from '../lib/videoDuration';
 import { computeReadiness } from '../lib/readiness';
 import { adjacentMarker, currentMarkerIndex } from '../lib/markers';
 import { getBufferDurationSec } from '../lib/qualitySettings';
@@ -29,6 +30,14 @@ function snapFps(measured: number | undefined): number {
     if (Math.abs(c - measured) < Math.abs(best - measured)) best = c;
   }
   return best;
+}
+
+/** mm:ss.d pour l'affichage de la position dans le replay */
+function formatTime(sec: number): string {
+  const s = Math.max(0, sec);
+  const m = Math.floor(s / 60);
+  const rest = s - m * 60;
+  return `${m}:${rest.toFixed(1).padStart(4, '0')}`;
 }
 
 export default function ArbitragePage() {
@@ -60,6 +69,16 @@ export default function ArbitragePage() {
   const [frozenSlots, setFrozenSlots] = useState<Set<SlotId>>(new Set());
   const lastReconnectAt = useRef<Map<SlotId, number>>(new Map());
   const disconnectTimers = useRef<Map<SlotId, ReturnType<typeof setTimeout>>>(new Map());
+
+  // Durée RÉELLE de chaque vidéo de la capture (sondée sur le fichier, pas estimée par les chunks)
+  const [probedDurations, setProbedDurations] = useState<Map<SlotId, number>>(new Map());
+  const probeGenRef = useRef(0);
+  // Signal de mouvement de la caméra maître (référentiel timeline) → courbe affichée
+  const [motionSignal, setMotionSignal] = useState<MotionSignal | null>(null);
+  // Calibration du fps sur les vraies images : écarts de temps média mesurés à chaque pas image par image
+  const frameDeltaSamples = useRef<number[]>([]);
+  // L'analyse IA se lance toute seule à l'entrée en VAR
+  const autoAnalysisArmed = useRef(false);
 
   // Persistent VAR video refs — one per camera, never unmounted during VAR
   const varVideoRefs = useRef<Map<SlotId, HTMLVideoElement>>(new Map());
@@ -251,6 +270,23 @@ export default function ArbitragePage() {
     }
   }, [slots]);
 
+  // Sonde la durée réelle des blobs d'une capture (les heures d'arrivée des chunks sous-estiment
+  // la vidéo dès que le réseau hoquette → timeline trop courte, compteur qui dépasse le total)
+  const probeDurations = useCallback((urls: Map<SlotId, string>) => {
+    const gen = ++probeGenRef.current;
+    setProbedDurations(new Map());
+    urls.forEach((url, slotId) => {
+      probeBlobDuration(url).then((d) => {
+        if (d === null || probeGenRef.current !== gen) return;
+        setProbedDurations((prev) => {
+          const next = new Map(prev);
+          next.set(slotId, d);
+          return next;
+        });
+      });
+    });
+  }, []);
+
   // ============ VAR trigger ============
   const handleVarPress = useCallback(async () => {
     // Stop buffer recording
@@ -316,6 +352,11 @@ export default function ArbitragePage() {
     setAnalysisProgress(null);
     setAnalysisSummary(null);
     setImpactMarkers([]);
+    setMotionSignal(null);
+
+    probeDurations(urls);
+    frameDeltaSamples.current = [];
+    autoAnalysisArmed.current = true;
 
     setVarOffsets(offsets);
     setVarDurationMs(maxDurationMs);
@@ -329,9 +370,11 @@ export default function ArbitragePage() {
     setCurrentTimeDisplay(0);
     setCurrentFrame(0);
     setTotalFrames(Math.round((maxDurationMs / 1000) * nextFps));
-  }, [slots, getBuffer, stopBufferRecording, recording, streams, startBufferRecording, getStatsSnapshot]);
+  }, [slots, getBuffer, stopBufferRecording, recording, streams, startBufferRecording, getStatsSnapshot, probeDurations]);
 
   const exitVarMode = useCallback(() => {
+    autoAnalysisArmed.current = false;
+    probeGenRef.current++;
     setVarMode(false);
     setIsPlaying(false);
     setExpandedSlot(null);
@@ -343,6 +386,7 @@ export default function ArbitragePage() {
     setAnalysisProgress(null);
     setAnalysisSummary(null);
     setImpactMarkers([]);
+    setMotionSignal(null);
 
     // Save current capture to history (blobs kept alive)
     if (varBlobs.size > 0) {
@@ -397,6 +441,11 @@ export default function ArbitragePage() {
     setAnalysisProgress(null);
     setAnalysisSummary(null);
     setImpactMarkers([]);
+    setMotionSignal(null);
+
+    probeDurations(capture.blobs);
+    frameDeltaSamples.current = [];
+    autoAnalysisArmed.current = true;
 
     setFps(capture.fps);
     setVarOffsets(capture.offsets);
@@ -411,7 +460,7 @@ export default function ArbitragePage() {
     setCurrentTimeDisplay(0);
     setCurrentFrame(0);
     setTotalFrames(Math.round((capture.durationMs / 1000) * capture.fps));
-  }, [slots, stopBufferRecording, recording]);
+  }, [slots, stopBufferRecording, recording, probeDurations]);
 
   // Pause/resume buffer recording (between fights)
   const toggleBufferPause = useCallback(() => {
@@ -476,12 +525,13 @@ export default function ArbitragePage() {
       let synced = 0;
       if (masterSig) {
         const masterAdj = toTimeline(masterSig, masterOffset);
+        setMotionSignal(masterAdj);
 
         // Marqueurs d'impacts (déjà en temps timeline)
         const spikes = findImpactSpikes(masterAdj);
-        const markers = spikes
-          .map((s) => s * 1000)
-          .filter((ms) => ms >= 0 && ms <= varDurationMs);
+        // Pas de borne haute : la durée réelle peut n'être connue qu'après l'analyse,
+        // et c'est justement la fin du replay qui manquait à l'estimation
+        const markers = spikes.map((s) => s * 1000).filter((ms) => ms >= 0);
         setImpactMarkers(markers);
         markerCount = markers.length;
 
@@ -508,9 +558,12 @@ export default function ArbitragePage() {
       if (!masterSig) {
         setAnalysisSummary('Analyse impossible sur cette capture');
       } else {
-        const impactsTxt = `${markerCount} impact${markerCount > 1 ? 's' : ''}`;
-        const syncTxt = synced > 0 ? ` — ${synced} caméra${synced > 1 ? 's' : ''} resynchronisée${synced > 1 ? 's' : ''}` : '';
-        setAnalysisSummary(`⚡ ${impactsTxt}${syncTxt}`);
+        const syncTxt = synced > 0 ? ` · ${synced} caméra${synced > 1 ? 's' : ''} resynchronisée${synced > 1 ? 's' : ''}` : '';
+        if (markerCount === 0) {
+          setAnalysisSummary(`Aucun mouvement brusque détecté${syncTxt}`);
+        } else {
+          setAnalysisSummary(`⚡ ${markerCount} pic${markerCount > 1 ? 's' : ''} de mouvement${syncTxt} — ◆ pour naviguer`);
+        }
       }
     } finally {
       if (analysisAbortRef.current === abort) {
@@ -531,6 +584,39 @@ export default function ArbitragePage() {
     if (el) el.currentTime = Math.max(0, varTimeRef.current + newOffset);
   }, [varOffsets, frameInterval]);
 
+  // Durée réelle : dès qu'une sonde répond, la timeline et le total d'images suivent la vidéo
+  // (fin de timeline = fin de la caméra qui couvre le plus de passé, offsets inclus)
+  useEffect(() => {
+    if (!varMode || probedDurations.size === 0) return;
+    let end = 0;
+    probedDurations.forEach((d, slotId) => {
+      end = Math.max(end, d - (varOffsets.get(slotId) || 0));
+    });
+    if (end > 0) setVarDurationMs(Math.round(end * 1000));
+  }, [varMode, probedDurations, varOffsets]);
+
+  // Total d'images = durée × fps : suit la durée réelle ET la recalibration du fps
+  useEffect(() => {
+    if (varMode) setTotalFrames(varTotalFrames);
+  }, [varMode, varTotalFrames]);
+
+  // Analyse IA automatique à l'entrée en VAR (l'arbitre n'a rien à comprendre ni à cliquer)
+  useEffect(() => {
+    if (!varMode || varBlobs.size === 0 || !autoAnalysisArmed.current || analysisStatus) return;
+    const t = setTimeout(() => {
+      if (!autoAnalysisArmed.current) return;
+      autoAnalysisArmed.current = false;
+      runAnalysis();
+    }, 800);
+    return () => clearTimeout(t);
+  }, [varMode, varBlobs, analysisStatus, runAnalysis]);
+
+  // Courbe affichée sur la timeline, recalculée si la durée réelle change
+  const motionCurve = useMemo(
+    () => (motionSignal ? buildDisplayCurve(motionSignal, varDurationSec) : null),
+    [motionSignal, varDurationSec]
+  );
+
   // ============ Frame stepping — deterministic counter + camera sync ============
 
   // Helper: update display from frameCounterRef
@@ -546,7 +632,8 @@ export default function ArbitragePage() {
 
     const master = getMasterEntry();
     if (!master) return;
-    const [masterSlotId] = master;
+    const [masterSlotId, masterBefore] = master;
+    const timeBefore = masterBefore.currentTime;
 
     for (let i = 0; i < frames; i++) {
       // Advance ALL cameras via RVFC in parallel (each advances one real decoded frame)
@@ -576,11 +663,25 @@ export default function ArbitragePage() {
     if (masterEl) {
       const masterOffset = varOffsets.get(masterSlotId) || 0;
       varTimeRef.current = masterEl.currentTime - masterOffset;
+
+      // Calibration du fps sur les vraies images : chaque pas avance d'exactement une image
+      // décodée, l'écart de temps média mesuré donne la cadence réelle de l'enregistrement
+      const delta = (masterEl.currentTime - timeBefore) / frames;
+      if (delta > 0.004 && delta < 0.2) {
+        const samples = frameDeltaSamples.current;
+        samples.push(delta);
+        if (samples.length > 40) samples.shift();
+        if (samples.length >= 6) {
+          const sorted = [...samples].sort((a, b) => a - b);
+          const measured = snapFps(1 / sorted[Math.floor(sorted.length / 2)]);
+          if (Math.abs(measured - fps) >= 2) setFps(measured);
+        }
+      }
     }
 
     setIsPlaying(false);
     updateDisplay();
-  }, [getMasterEntry, varOffsets, updateDisplay]);
+  }, [getMasterEntry, varOffsets, updateDisplay, fps]);
 
   // Step backward N frames: decrement counter, seek all videos
   const stepBackward = useCallback((frames: number) => {
@@ -747,7 +848,9 @@ export default function ArbitragePage() {
           <button className="var-ctl" onClick={() => stepForward(1)} title="+1 image (→)">1 {'\u25B6'}</button>
           <button className="var-ctl" onClick={() => stepForward(10)} title="+10 images (↑)">10 {'\u25B6\u25B6'}</button>
         </div>
-        <div className="var-frame font-mono">{currentFrame} / {totalFrames}</div>
+        <div className="var-frame font-mono" title="position · image / total">
+          {formatTime(currentTimeDisplay)} · {Math.min(currentFrame, totalFrames)} / {totalFrames}
+        </div>
         <div className="var-group">
           <button className="var-ctl impact" disabled={impactCount === 0} onClick={() => goToImpact(-1)} title="Impact précédent (Maj + ←)">{'\u25C0'} ◆</button>
           <span className="var-impact-count font-mono">
@@ -764,9 +867,9 @@ export default function ArbitragePage() {
           className="var-ctl analyse"
           onClick={runAnalysis}
           disabled={analysing}
-          title="Détecte les impacts probables (marqueurs timeline) et resynchronise les caméras (touche A)"
+          title="Lancée automatiquement à l'entrée en VAR : mesure l'intensité du mouvement (courbe orange), marque les pics brusques (◆) et resynchronise les caméras. Touche A pour relancer."
         >
-          {analysing ? `⏳ ${Math.round((analysisProgress ?? 0) * 100)} %` : '⚡ ANALYSE IA'}
+          {analysing ? `⏳ ${Math.round((analysisProgress ?? 0) * 100)} %` : motionSignal ? '↻ RELANCER L\'ANALYSE' : '⚡ ANALYSE IA'}
         </button>
         {analysisSummary && <span className="var-summary font-mono">{analysisSummary}</span>}
         <button className="btn-live var-ctl-live" onClick={exitVarMode} title="Retour au direct (Échap)">
@@ -932,7 +1035,12 @@ export default function ArbitragePage() {
 
           {/* Timeline */}
           <div style={{ padding: '4px 12px', flexShrink: 0 }}>
-            <VarTimeline durationMs={varDurationMs} currentTimeMs={currentTimeDisplay * 1000} fps={fps} onSeek={handleSeek} markers={impactMarkers} analysisProgress={analysisProgress} />
+            <VarTimeline durationMs={varDurationMs} currentTimeMs={currentTimeDisplay * 1000} fps={fps} onSeek={handleSeek} markers={impactMarkers} analysisProgress={analysisProgress} curve={motionCurve} />
+            {motionCurve && (
+              <div className="var-legend">
+                <b>Courbe orange</b> = intensité du mouvement · <b>◆</b> = pic brusque (touche, parade ou clash) · l'analyse pointe les moments à regarder, l'arbitre décide
+              </div>
+            )}
           </div>
 
           {/* Controls */}
