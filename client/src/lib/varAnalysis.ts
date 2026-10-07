@@ -66,7 +66,7 @@ export function zNormalize(values: Float32Array): Float32Array {
 export interface OffsetOptions {
   /** décalage maximal recherché en secondes (défaut 2.5) */
   maxLagSec?: number;
-  /** pas de la grille en secondes (défaut 0.05) */
+  /** pas de la grille en secondes (défaut 0.02 : précision ≈ 1 image à 50/60 fps) */
   dt?: number;
   /** corrélation minimale pour accepter le résultat (défaut 0.35) */
   minCorrelation?: number;
@@ -80,7 +80,7 @@ export interface OffsetOptions {
  * Retourne null si les signaux ne se ressemblent pas assez pour conclure.
  */
 export function estimateOffsetSec(a: MotionSignal, b: MotionSignal, opts: OffsetOptions = {}): number | null {
-  const dt = opts.dt ?? 0.05;
+  const dt = opts.dt ?? 0.02;
   const maxLagSec = opts.maxLagSec ?? 2.5;
   const minCorrelation = opts.minCorrelation ?? 0.35;
   const minOverlapSec = opts.minOverlapSec ?? 3;
@@ -141,12 +141,16 @@ export const FLAT_SIGNAL_RATIO = 2.5;
 export interface SpikeOptions {
   /** pas de la grille en secondes (défaut 0.05) */
   dt?: number;
-  /** z-score robuste minimal pour un pic (défaut 3) */
+  /** z-score robuste minimal pour un pic (défaut 5 : un z de 3 laisse passer ~1 faux pic par minute) */
   threshold?: number;
+  /** un pic doit aussi dépasser ce multiple de la médiane (défaut 3 : un impact domine nettement le mouvement courant) */
+  minRatio?: number;
   /** distance minimale entre deux pics en secondes (défaut 0.5) */
   minSeparationSec?: number;
-  /** nombre maximal de pics retournés (défaut 12) */
+  /** nombre maximal de pics retournés (défaut 8) */
   maxCount?: number;
+  /** début de signal ignoré pour les pics, en secondes (défaut 0.5 : démarrage du décodeur, première keyframe) */
+  ignoreStartSec?: number;
 }
 
 /**
@@ -156,9 +160,11 @@ export interface SpikeOptions {
  */
 export function findImpactSpikes(sig: MotionSignal, opts: SpikeOptions = {}): number[] {
   const dt = opts.dt ?? 0.05;
-  const threshold = opts.threshold ?? 3;
+  const threshold = opts.threshold ?? 5;
+  const minRatio = opts.minRatio ?? 3;
   const minSeparationSec = opts.minSeparationSec ?? 0.5;
-  const maxCount = opts.maxCount ?? 12;
+  const maxCount = opts.maxCount ?? 8;
+  const ignoreStartSec = opts.ignoreStartSec ?? 0.5;
 
   const uni = resampleUniform(sig, dt);
   if (!uni) return [];
@@ -186,9 +192,13 @@ export function findImpactSpikes(sig: MotionSignal, opts: SpikeOptions = {}): nu
 
   interface Candidate { idx: number; z: number }
   const candidates: Candidate[] = [];
-  for (let i = 1; i < n - 1; i++) {
+  const firstIdx = Math.max(1, Math.ceil((ignoreStartSec - uni.start) / dt));
+  for (let i = firstIdx; i < n - 1; i++) {
     const z = (v[i] - median) / scale;
-    if (z >= threshold && v[i] >= v[i - 1] && v[i] > v[i + 1]) {
+    // Le rapport à la médiane se juge sur le signal BRUT : un impact d'une seule image est dilué
+    // jusqu'à 3× par le lissage, il resterait pourtant un vrai pic
+    const rawPeak = Math.max(raw[i - 1], raw[i], raw[i + 1]);
+    if (z >= threshold && rawPeak >= minRatio * median && v[i] >= v[i - 1] && v[i] > v[i + 1]) {
       candidates.push({ idx: i, z });
     }
   }
@@ -240,7 +250,8 @@ export function buildDisplayCurve(sig: MotionSignal, durationSec: number, bins =
 // ==================== Extraction du signal (DOM, non testé unitairement) ====================
 
 export interface ExtractOptions {
-  /** vitesse de lecture pour l'analyse (défaut 8×) */
+  /** vitesse de lecture pour l'analyse (défaut 4× : requestVideoFrameCallback ne voit qu'une image par
+   *  rafraîchissement d'écran, à 8× on ne voyait qu'une image sur 8 et les impacts brefs passaient à travers) */
   playbackRate?: number;
   /** plus grande dimension du canvas d'analyse (défaut 96 px) */
   maxDim?: number;
@@ -257,7 +268,7 @@ export interface ExtractOptions {
  * avec la frame précédente, normalisée par l'écart de temps média.
  */
 export function extractMotionSignal(blobUrl: string, opts: ExtractOptions = {}): Promise<MotionSignal> {
-  const playbackRate = opts.playbackRate ?? 8;
+  const playbackRate = opts.playbackRate ?? 4;
   const maxDim = opts.maxDim ?? 96;
   const expected = opts.expectedDurationSec ?? 0;
 

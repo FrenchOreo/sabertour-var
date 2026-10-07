@@ -109,8 +109,12 @@ Fabriquer l'application localement : `npm install` puis `npm run build:app:mac` 
   où l'action se passe), marque les **pics brusques ◆** (touche, parade ou clash — le
   clic s'aimante dessus) et resynchronise les caméras entre elles. Elle ne juge pas :
   elle pointe les moments à regarder. Touche `A` ou « Relancer l'analyse » pour refaire.
-- La **durée de la timeline est mesurée sur la vidéo réelle** (et plus estimée) : la
-  barre et le compteur d'images correspondent exactement au replay.
+- La **durée et la cadence de la timeline sont mesurées sur la vidéo réelle** (et plus
+  estimées) : la barre et le compteur d'images correspondent exactement au replay, et
+  chaque pas ← → cale **toutes** les caméras sur la même image (décalages de synchro
+  compris), quelle que soit la charge de l'ordinateur.
+- **Positions non équipées** (tournoi à 2 ou 3 caméras) : le bandeau reste **✅ PRÊT**, elles
+  sont simplement listées ; seule une caméra qui filmait et a disparu passe en ⚠.
 - **◆ précédent / suivant** (ou `Maj + ←/→`) : saute d'un impact à l'autre, le
   compteur indique « impact 2 / 5 ».
 - **−1f / +1f** sur chaque tuile : recalage manuel d'une caméra à la frame près.
