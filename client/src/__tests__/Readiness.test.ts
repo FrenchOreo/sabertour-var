@@ -28,11 +28,22 @@ describe('computeReadiness', () => {
     expect(r.title).toContain('replay 42 s');
   });
 
-  it('warns (not blocks) when a position is offline but others are fine', () => {
-    const r = computeReadiness([cam({ slotId: 1 }), cam({ slotId: 2, name: 'FOND', cameraConnected: false })], opts);
+  it('warns (not blocks) when a camera that was filming dropped offline', () => {
+    const r = computeReadiness([cam({ slotId: 1 }), cam({ slotId: 2, name: 'FOND', cameraConnected: false, everConnected: true })], opts);
     expect(r.level).toBe('warning');
     expect(r.title).toBe('Caméra FOND hors ligne');
     expect(r.chips[1]).toMatchObject({ tone: 'off', text: 'hors ligne' });
+  });
+
+  it('stays ready with positions that were never equipped (2-camera tournament)', () => {
+    const r = computeReadiness(
+      [cam({ slotId: 1 }), cam({ slotId: 2 }), cam({ slotId: 3, name: 'FOND', cameraConnected: false }), cam({ slotId: 4, name: 'JUGE', cameraConnected: false })],
+      opts
+    );
+    expect(r.level).toBe('ready');
+    expect(r.title).toContain('2 caméras OK');
+    expect(r.details).toEqual(['Positions non équipées : FOND, JUGE']);
+    expect(r.chips[2]).toMatchObject({ tone: 'off', text: 'non équipée' });
   });
 
   it('blocks when no camera is connected at all', () => {

@@ -15,6 +15,8 @@ export interface SlotReadinessInput {
   health?: ConnectionHealth;
   /** flux perdu / gelé détecté par l'auto-réparation */
   frozen?: boolean;
+  /** la caméra a déjà été vue connectée pendant cette session (une position jamais équipée n'est pas une panne) */
+  everConnected?: boolean;
   /** durée de replay disponible dans le buffer (ms) */
   bufferMs: number;
 }
@@ -56,13 +58,21 @@ export function computeReadiness(slots: SlotReadinessInput[], opts: ReadinessOpt
   const blocked: string[] = [];
   const warnings: string[] = [];
   const connected = slots.filter((s) => s.cameraConnected);
-  const offline = slots.filter((s) => !s.cameraConnected);
+  // Une caméra qui a filmé puis a disparu est une panne ; une position jamais équipée
+  // (tournoi à 2 ou 3 caméras) ne doit pas bloquer le « PRÊT » toute la journée
+  const dropped = slots.filter((s) => !s.cameraConnected && s.everConnected);
+  const unequipped = slots.filter((s) => !s.cameraConnected && !s.everConnected);
+  const infos: string[] = [];
 
   if (connected.length === 0) {
     blocked.push('Aucune caméra connectée');
-  } else if (offline.length > 0) {
-    // Une position non équipée n'empêche pas d'arbitrer : simple avertissement
-    warnings.push(`${offline.length > 1 ? 'Caméras' : 'Caméra'} ${offline.map((s) => s.name).join(', ')} hors ligne`);
+  } else {
+    if (dropped.length > 0) {
+      warnings.push(`${dropped.length > 1 ? 'Caméras' : 'Caméra'} ${dropped.map((s) => s.name).join(', ')} hors ligne`);
+    }
+    if (unequipped.length > 0) {
+      infos.push(`${unequipped.length > 1 ? 'Positions non équipées' : 'Position non équipée'} : ${unequipped.map((s) => s.name).join(', ')}`);
+    }
   }
 
   for (const s of connected) {
@@ -88,7 +98,7 @@ export function computeReadiness(slots: SlotReadinessInput[], opts: ReadinessOpt
     let text = `${Math.round(s.bufferMs / 1000)} s`;
     if (!s.cameraConnected) {
       tone = 'off';
-      text = 'hors ligne';
+      text = s.everConnected ? 'hors ligne' : 'non équipée';
     } else if (s.frozen) {
       tone = 'bad';
       text = 'gelé';
@@ -104,13 +114,13 @@ export function computeReadiness(slots: SlotReadinessInput[], opts: ReadinessOpt
     return { level: 'blocked', title: blocked[0], details: [...blocked.slice(1), ...warnings], chips };
   }
   if (warnings.length > 0) {
-    return { level: 'warning', title: warnings[0], details: warnings.slice(1), chips };
+    return { level: 'warning', title: warnings[0], details: [...warnings.slice(1), ...infos], chips };
   }
   const replaySec = Math.round(Math.min(...connected.map((s) => s.bufferMs)) / 1000);
   return {
     level: 'ready',
     title: `Prêt — ${plural(connected.length, 'caméra')} OK · replay ${replaySec} s`,
-    details: [],
+    details: infos,
     chips,
   };
 }

@@ -5,7 +5,7 @@ import { useVideoBuffer } from '../hooks/useVideoBuffer';
 import { useRecording } from '../hooks/useRecording';
 import { useConnectionStats, getHealth, STALL_POLLS_FROZEN } from '../hooks/useConnectionStats';
 import { extractMotionSignal, findImpactSpikes, estimateOffsetSec, buildDisplayCurve, MotionSignal } from '../lib/varAnalysis';
-import { probeBlobDuration } from '../lib/videoDuration';
+import { probeBlobDuration, probeBlobFrameRate, snapFrameRate } from '../lib/videoDuration';
 import { computeReadiness } from '../lib/readiness';
 import { adjacentMarker, currentMarkerIndex } from '../lib/markers';
 import { getBufferDurationSec } from '../lib/qualitySettings';
@@ -24,12 +24,16 @@ const DISCONNECT_GRACE_MS = 4000;
 /** Cale le fps mesuré (fluctuant) sur la cadence de capture la plus proche */
 function snapFps(measured: number | undefined): number {
   if (!measured || measured < 10) return FPS_DEFAULT;
-  const COMMON = [24, 25, 30, 50, 60];
-  let best = COMMON[0];
-  for (const c of COMMON) {
-    if (Math.abs(c - measured) < Math.abs(best - measured)) best = c;
-  }
-  return best;
+  return snapFrameRate(measured);
+}
+
+/** Pas d'échantillonnage médian d'un signal (secondes) — 0 si trop court */
+function medianStep(times: number[]): number {
+  if (times.length < 3) return 0;
+  const d: number[] = [];
+  for (let i = 1; i < times.length; i++) d.push(times[i] - times[i - 1]);
+  d.sort((a, b) => a - b);
+  return d[Math.floor(d.length / 2)];
 }
 
 /** mm:ss.d pour l'affichage de la position dans le replay */
@@ -73,10 +77,14 @@ export default function ArbitragePage() {
   // Durée RÉELLE de chaque vidéo de la capture (sondée sur le fichier, pas estimée par les chunks)
   const [probedDurations, setProbedDurations] = useState<Map<SlotId, number>>(new Map());
   const probeGenRef = useRef(0);
+  // La sonde de cadence (lecture 1× d'un extrait) doit finir AVANT l'analyse IA : lancées ensemble,
+  // le décodage en parallèle lui fait sauter des images et fausse la mesure
+  const [fpsProbeGen, setFpsProbeGen] = useState(0);
   // Signal de mouvement de la caméra maître (référentiel timeline) → courbe affichée
   const [motionSignal, setMotionSignal] = useState<MotionSignal | null>(null);
-  // Calibration du fps sur les vraies images : écarts de temps média mesurés à chaque pas image par image
-  const frameDeltaSamples = useRef<number[]>([]);
+  // Positions déjà vues connectées : une caméra qui disparaît est une panne, une position jamais
+  // équipée (tournoi à 2 caméras) ne doit pas empêcher le « PRÊT »
+  const everConnectedRef = useRef<Set<SlotId>>(new Set());
   // L'analyse IA se lance toute seule à l'entrée en VAR
   const autoAnalysisArmed = useRef(false);
 
@@ -112,25 +120,19 @@ export default function ArbitragePage() {
   const varDurationSec = varDurationMs / 1000;
   const varTotalFrames = Math.round(varDurationSec * fps);
 
-  // Get the active video element (expanded one, or first available)
-  const getActiveVideo = useCallback((): HTMLVideoElement | null => {
-    if (expandedSlot !== null) {
-      return varVideoRefs.current.get(expandedSlot) || null;
-    }
-    // In grid mode, use first available
-    for (const [, el] of varVideoRefs.current) {
-      if (el.src) return el;
-    }
-    return null;
-  }, [expandedSlot]);
+  // Image k ↔ temps timeline k/fps. Pour afficher l'image k on vise le MILIEU de son intervalle :
+  // le navigateur présente l'image dont l'horodatage précède le temps demandé, viser pile k/fps
+  // tomberait une image trop tôt dès que l'horodatage a un peu de gigue.
+  const frameToMedia = useCallback((frame: number, offset: number) => Math.max(0, (frame + 0.5) * frameInterval + offset), [frameInterval]);
+  const mediaToFrame = useCallback((mediaTime: number, offset: number) => Math.max(0, Math.round((mediaTime - offset) * fps - 0.5)), [fps]);
 
-  // Set time on ALL var videos with per-camera offset for sync
-  const seekAllTo = useCallback((time: number) => {
+  // Cale TOUTES les vidéos sur l'image `frame` de la timeline, chacune avec son décalage de synchro
+  const seekAllToFrame = useCallback((frame: number) => {
     varVideoRefs.current.forEach((v, slotId) => {
       const offset = varOffsets.get(slotId) || 0;
-      v.currentTime = time + offset;
+      v.currentTime = frameToMedia(frame, offset);
     });
-  }, [varOffsets]);
+  }, [varOffsets, frameToMedia]);
 
   // Get the "master" video (first one) and its slot for RVFC-based stepping
   const getMasterEntry = useCallback((): [SlotId, HTMLVideoElement] | null => {
@@ -266,7 +268,10 @@ export default function ArbitragePage() {
   useEffect(() => { if (connected) send({ type: 'arbitre-join' }); }, [connected, send]);
   useEffect(() => {
     for (const slot of slots) {
-      if (slot.cameraConnected) webrtc.ensureConnected(slot.slotId);
+      if (slot.cameraConnected) {
+        everConnectedRef.current.add(slot.slotId);
+        webrtc.ensureConnected(slot.slotId);
+      }
     }
   }, [slots]);
 
@@ -285,6 +290,18 @@ export default function ArbitragePage() {
         });
       });
     });
+    // Cadence réelle de l'enregistrement, mesurée sur les images de la caméra maître :
+    // c'est elle qui définit le pas « ±1 image » et le total d'images
+    const master = urls.entries().next().value as [SlotId, string] | undefined;
+    if (master) {
+      probeBlobFrameRate(master[1]).then((measured) => {
+        if (probeGenRef.current !== gen) return;
+        if (measured !== null) setFps(snapFps(measured));
+        setFpsProbeGen(gen);
+      });
+    } else {
+      setFpsProbeGen(gen);
+    }
   }, []);
 
   // ============ VAR trigger ============
@@ -355,7 +372,6 @@ export default function ArbitragePage() {
     setMotionSignal(null);
 
     probeDurations(urls);
-    frameDeltaSamples.current = [];
     autoAnalysisArmed.current = true;
 
     setVarOffsets(offsets);
@@ -444,7 +460,6 @@ export default function ArbitragePage() {
     setMotionSignal(null);
 
     probeDurations(capture.blobs);
-    frameDeltaSamples.current = [];
     autoAnalysisArmed.current = true;
 
     setFps(capture.fps);
@@ -485,29 +500,30 @@ export default function ArbitragePage() {
 
     try {
       const signals = new Map<SlotId, MotionSignal>();
-      let done = 0;
-      for (const [slotId, url] of entries) {
-        if (abort.aborted) return;
-        done++;
-        setAnalysisStatus(`Analyse caméra ${done}/${entries.length}…`);
+      setAnalysisStatus(`Analyse de ${entries.length} caméra${entries.length > 1 ? 's' : ''}…`);
+      // Toutes les caméras en parallèle (le décodage est multi-cœur) : ~4× plus rapide qu'en série
+      const progress = new Map<SlotId, number>();
+      await Promise.all(entries.map(async ([slotId, url]) => {
         try {
-          const camIndex = done - 1;
           const sig = await extractMotionSignal(url, {
             expectedDurationSec: expected,
             abort,
             onProgress: (f) => {
+              progress.set(slotId, f);
               // ~10 mises à jour/s suffisent pour la barre de progression de la timeline
               const now = performance.now();
               if (now - lastProgressUpdate.current < 100) return;
               lastProgressUpdate.current = now;
-              setAnalysisProgress((camIndex + f) / entries.length);
+              let sum = 0;
+              progress.forEach((p) => { sum += p; });
+              setAnalysisProgress(sum / entries.length);
             },
           });
           if (sig.times.length > 10) signals.set(slotId, sig);
         } catch {
           // caméra illisible — on continue avec les autres
         }
-      }
+      }));
       if (abort.aborted) return;
 
       const masterSig = signals.get(masterSlotId);
@@ -536,13 +552,18 @@ export default function ArbitragePage() {
         markerCount = markers.length;
 
         // Synchro auto : les caméras filment la même scène, la corrélation croisée
-        // de leurs signaux de mouvement donne le décalage réel entre elles
+        // de leurs signaux de mouvement donne le décalage réel entre elles.
+        // Les signaux sont échantillonnés à ~10 images/s : la corrélation ne vaut qu'à cette
+        // précision près. On ne corrige que les décalages plus grands que ce pas — un petit
+        // « résidu » n'est que du bruit et dégraderait une synchro déjà bonne (±1 image).
         const newOffsets = new Map(varOffsets);
+        const masterStep = medianStep(masterAdj.times);
         for (const [slotId, sig] of signals) {
           if (slotId === masterSlotId) continue;
           const currentOffset = varOffsets.get(slotId) || 0;
           const residual = estimateOffsetSec(masterAdj, toTimeline(sig, currentOffset));
-          if (residual !== null && Math.abs(residual) > 0.01) {
+          const uncertainty = Math.max(0.04, masterStep, medianStep(sig.times));
+          if (residual !== null && Math.abs(residual) > uncertainty) {
             newOffsets.set(slotId, currentOffset + residual);
             synced++;
           }
@@ -550,7 +571,7 @@ export default function ArbitragePage() {
         if (synced > 0) {
           setVarOffsets(newOffsets);
           varVideoRefs.current.forEach((v, slotId) => {
-            v.currentTime = Math.max(0, varTimeRef.current + (newOffsets.get(slotId) || 0));
+            v.currentTime = frameToMedia(frameCounterRef.current, newOffsets.get(slotId) || 0);
           });
         }
       }
@@ -572,7 +593,7 @@ export default function ArbitragePage() {
         analysisAbortRef.current = null;
       }
     }
-  }, [analysisStatus, varBlobs, varDurationMs, varOffsets, getMasterEntry]);
+  }, [analysisStatus, varBlobs, varDurationMs, varOffsets, getMasterEntry, frameToMedia]);
 
   // Ajustement manuel de synchro : décale une caméra de ±1 frame
   const nudgeCamera = useCallback((slotId: SlotId, deltaFrames: number) => {
@@ -581,8 +602,8 @@ export default function ArbitragePage() {
     next.set(slotId, newOffset);
     setVarOffsets(next);
     const el = varVideoRefs.current.get(slotId);
-    if (el) el.currentTime = Math.max(0, varTimeRef.current + newOffset);
-  }, [varOffsets, frameInterval]);
+    if (el) el.currentTime = frameToMedia(frameCounterRef.current, newOffset);
+  }, [varOffsets, frameInterval, frameToMedia]);
 
   // Durée réelle : dès qu'une sonde répond, la timeline et le total d'images suivent la vidéo
   // (fin de timeline = fin de la caméra qui couvre le plus de passé, offsets inclus)
@@ -600,16 +621,25 @@ export default function ArbitragePage() {
     if (varMode) setTotalFrames(varTotalFrames);
   }, [varMode, varTotalFrames]);
 
-  // Analyse IA automatique à l'entrée en VAR (l'arbitre n'a rien à comprendre ni à cliquer)
+  // Les décalages de synchro s'appliquent dès l'entrée en VAR (avant, chaque vidéo partait de 0 et
+  // les caméras restaient désynchronisées jusqu'au premier seek) et à chaque changement de cadence
+  useEffect(() => {
+    if (!varMode || isPlaying) return;
+    seekAllToFrame(frameCounterRef.current);
+  }, [varMode, seekAllToFrame, isPlaying]);
+
+  // Analyse IA automatique à l'entrée en VAR (l'arbitre n'a rien à comprendre ni à cliquer),
+  // dès que la cadence réelle est mesurée (4 s au plus)
   useEffect(() => {
     if (!varMode || varBlobs.size === 0 || !autoAnalysisArmed.current || analysisStatus) return;
+    if (fpsProbeGen !== probeGenRef.current) return;
     const t = setTimeout(() => {
       if (!autoAnalysisArmed.current) return;
       autoAnalysisArmed.current = false;
       runAnalysis();
-    }, 800);
+    }, 300);
     return () => clearTimeout(t);
-  }, [varMode, varBlobs, analysisStatus, runAnalysis]);
+  }, [varMode, varBlobs, analysisStatus, runAnalysis, fpsProbeGen]);
 
   // Courbe affichée sur la timeline, recalculée si la durée réelle change
   const motionCurve = useMemo(
@@ -626,108 +656,54 @@ export default function ArbitragePage() {
     setCurrentTimeDisplay(t);
   }, [frameInterval]);
 
-  // Step forward N frames: RVFC on ALL cameras in parallel
-  const stepForward = useCallback(async (frames: number) => {
+  // Pas à pas par POSITIONNEMENT : image k → chaque vidéo est calée sur l'image k (plus son décalage).
+  // L'ancien pas « lecture jusqu'à la prochaine image présentée » avançait de 1 à 3 images selon la
+  // charge du PC : le compteur dérivait de la vidéo et les caméras se désynchronisaient entre elles.
+  const stepFrames = useCallback((delta: number) => {
     varVideoRefs.current.forEach((v) => v.pause());
-
-    const master = getMasterEntry();
-    if (!master) return;
-    const [masterSlotId, masterBefore] = master;
-    const timeBefore = masterBefore.currentTime;
-
-    for (let i = 0; i < frames; i++) {
-      // Advance ALL cameras via RVFC in parallel (each advances one real decoded frame)
-      const promises: Promise<void>[] = [];
-      varVideoRefs.current.forEach((el) => {
-        const p = new Promise<void>((resolve) => {
-          const hasRVFC = typeof (el as any).requestVideoFrameCallback === 'function';
-          if (hasRVFC) {
-            (el as any).requestVideoFrameCallback(() => {
-              el.pause();
-              resolve();
-            });
-          } else {
-            setTimeout(() => { el.pause(); resolve(); }, 60);
-          }
-          el.playbackRate = 1;
-          el.play().catch(() => resolve());
-        });
-        promises.push(p);
-      });
-      await Promise.all(promises);
-      frameCounterRef.current += 1;
-    }
-
-    // Read master's actual time for the counter
-    const masterEl = varVideoRefs.current.get(masterSlotId);
-    if (masterEl) {
-      const masterOffset = varOffsets.get(masterSlotId) || 0;
-      varTimeRef.current = masterEl.currentTime - masterOffset;
-
-      // Calibration du fps sur les vraies images : chaque pas avance d'exactement une image
-      // décodée, l'écart de temps média mesuré donne la cadence réelle de l'enregistrement
-      const delta = (masterEl.currentTime - timeBefore) / frames;
-      if (delta > 0.004 && delta < 0.2) {
-        const samples = frameDeltaSamples.current;
-        samples.push(delta);
-        if (samples.length > 40) samples.shift();
-        if (samples.length >= 6) {
-          const sorted = [...samples].sort((a, b) => a - b);
-          const measured = snapFps(1 / sorted[Math.floor(sorted.length / 2)]);
-          if (Math.abs(measured - fps) >= 2) setFps(measured);
-        }
-      }
-    }
-
+    const maxFrame = varTotalFrames > 0 ? varTotalFrames : Number.MAX_SAFE_INTEGER;
+    frameCounterRef.current = Math.max(0, Math.min(maxFrame, frameCounterRef.current + delta));
+    varTimeRef.current = frameCounterRef.current * frameInterval;
+    seekAllToFrame(frameCounterRef.current);
     setIsPlaying(false);
     updateDisplay();
-  }, [getMasterEntry, varOffsets, updateDisplay, fps]);
+  }, [varTotalFrames, frameInterval, seekAllToFrame, updateDisplay]);
 
-  // Step backward N frames: decrement counter, seek all videos
-  const stepBackward = useCallback((frames: number) => {
-    varVideoRefs.current.forEach((v) => v.pause());
-    frameCounterRef.current = Math.max(0, frameCounterRef.current - frames);
-    const target = frameCounterRef.current * frameInterval;
-    varTimeRef.current = target;
-    seekAllTo(target);
-    setIsPlaying(false);
-    updateDisplay();
-  }, [frameInterval, seekAllTo, updateDisplay]);
+  const stepForward = useCallback((frames: number) => stepFrames(frames), [stepFrames]);
+  const stepBackward = useCallback((frames: number) => stepFrames(-frames), [stepFrames]);
 
   // Seek via timeline click
   const seekTo = useCallback((time: number) => {
     const clamped = Math.max(0, Math.min(time, varDurationSec));
-    varTimeRef.current = clamped;
     frameCounterRef.current = Math.round(clamped * fps);
-    seekAllTo(clamped);
+    varTimeRef.current = frameCounterRef.current * frameInterval;
+    seekAllToFrame(frameCounterRef.current);
     updateDisplay();
-  }, [varDurationSec, fps, seekAllTo, updateDisplay]);
+  }, [varDurationSec, fps, frameInterval, seekAllToFrame, updateDisplay]);
 
   const togglePlayPause = useCallback(() => {
     if (isPlaying) {
       varVideoRefs.current.forEach((v) => v.pause());
       setIsPlaying(false);
-      // Recalibrate from master video
+      // Recalibrate from master video, then re-align every camera on that exact frame
       const master = getMasterEntry();
       if (master) {
         const [masterSlotId, masterEl] = master;
-        const masterOffset = varOffsets.get(masterSlotId) || 0;
-        const realTime = masterEl.currentTime - masterOffset;
-        varTimeRef.current = realTime;
-        frameCounterRef.current = Math.round(realTime * fps);
+        frameCounterRef.current = mediaToFrame(masterEl.currentTime, varOffsets.get(masterSlotId) || 0);
+        varTimeRef.current = frameCounterRef.current * frameInterval;
+        seekAllToFrame(frameCounterRef.current);
         updateDisplay();
       }
     } else {
-      // Sync all videos to current time with offsets, then play
+      // Sync all videos to current frame with offsets, then play
       varVideoRefs.current.forEach((v, slotId) => {
-        const offset = varOffsets.get(slotId) || 0;
-        v.currentTime = varTimeRef.current + offset;
+        v.currentTime = frameToMedia(frameCounterRef.current, varOffsets.get(slotId) || 0);
         v.playbackRate = playbackRate;
         v.play().catch(() => {});
       });
       setIsPlaying(true);
     }
-  }, [isPlaying, getMasterEntry, varOffsets, playbackRate, fps, updateDisplay]);
+  }, [isPlaying, getMasterEntry, varOffsets, playbackRate, frameInterval, updateDisplay, mediaToFrame, frameToMedia, seekAllToFrame]);
 
   const handleSeek = useCallback((timeMs: number) => {
     seekTo(timeMs / 1000);
@@ -755,16 +731,14 @@ export default function ArbitragePage() {
       const master = getMasterEntry();
       if (!master) return;
       const [masterSlotId, masterEl] = master;
-      const masterOffset = varOffsets.get(masterSlotId) || 0;
-      const realTime = masterEl.currentTime - masterOffset;
-      varTimeRef.current = realTime;
-      frameCounterRef.current = Math.round(realTime * fps);
+      frameCounterRef.current = mediaToFrame(masterEl.currentTime, varOffsets.get(masterSlotId) || 0);
+      varTimeRef.current = frameCounterRef.current * frameInterval;
       setCurrentFrame(frameCounterRef.current);
       setTotalFrames(varTotalFrames);
-      setCurrentTimeDisplay(realTime);
+      setCurrentTimeDisplay(varTimeRef.current);
     }, 50);
     return () => clearInterval(frameUpdateRef.current);
-  }, [varMode, isPlaying, getActiveVideo, varDurationSec, varTotalFrames, fps]);
+  }, [varMode, isPlaying, getMasterEntry, varOffsets, varTotalFrames, frameInterval, mediaToFrame]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -808,8 +782,8 @@ export default function ArbitragePage() {
     }
   }, [recording, slots, streams]);
 
+  // (pas de preventDefault : React attache wheel en écouteur passif, et la page ne défile pas de toute façon)
   const handleVideoWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
     setVideoZoom((z) => Math.max(1, Math.min(5, z + (e.deltaY < 0 ? 0.25 : -0.25))));
   }, []);
 
@@ -827,6 +801,7 @@ export default function ArbitragePage() {
         cameraConnected: s.cameraConnected,
         health: st ? getHealth(st) : undefined,
         frozen: frozenSlots.has(s.slotId),
+        everConnected: everConnectedRef.current.has(s.slotId),
         bufferMs: bufferDurations.get(s.slotId) ?? 0,
       };
     }),

@@ -158,6 +158,15 @@ describe('findImpactSpikes', () => {
     expect(Math.abs(spikes[0] - 4)).toBeLessThan(0.15);
   });
 
+  it('ignores the decoder warm-up at the very start of the capture', () => {
+    const rng = makeRng(8);
+    const sig = sample((t) => 0.5 + 0.1 * rng() + bump(t, 0.2) + bump(t, 6), 0, 10, 0.05);
+    const spikes = findImpactSpikes(sig);
+    expect(spikes.length).toBe(1);
+    expect(Math.abs(spikes[0] - 6)).toBeLessThan(0.15);
+    expect(findImpactSpikes(sig, { ignoreStartSec: 0 }).length).toBe(2);
+  });
+
   it('returns empty array for too-short signals', () => {
     expect(findImpactSpikes({ times: [0], values: [1] })).toEqual([]);
     expect(findImpactSpikes({ times: [], values: [] })).toEqual([]);

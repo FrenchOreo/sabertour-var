@@ -13,6 +13,8 @@ export interface ConnectionStats {
   latencyMs: number;
   /** Meilleur fps observé pour ce slot : référence de cadence (la cible réglée sur le téléphone est inconnue ici) */
   peakFps: number;
+  /** fps lissé sur les derniers sondages : la santé ne doit pas clignoter sur un creux d'une seconde */
+  fpsSmooth?: number;
   /** Sondages consécutifs sans aucun octet reçu alors que la connexion se dit établie */
   stalledPolls: number;
   connectionState: RTCPeerConnectionState;
@@ -30,8 +32,9 @@ export function getHealth(s: ConnectionStats): ConnectionHealth {
   // Cadence jugée par rapport au meilleur fps vu sur cette caméra :
   // à 60 fps demandés, recevoir 30 fps est déjà une dégradation
   const ref = s.peakFps >= 20 ? s.peakFps : 0;
-  if (ref > 0 && s.fps > 0) {
-    const ratio = s.fps / ref;
+  const fps = s.fpsSmooth && s.fpsSmooth > 0 ? s.fpsSmooth : s.fps;
+  if (ref > 0 && fps > 0) {
+    const ratio = fps / ref;
     if (ratio < 0.5) return 'bad';
     if (ratio < 0.8) return 'degraded';
   }
@@ -48,6 +51,7 @@ interface PrevCounters {
   jitterBufferEmittedCount: number;
   stalledPolls: number;
   timestampMs: number;
+  fpsSmooth: number;
 }
 
 const POLL_INTERVAL_MS = 2000;
@@ -97,6 +101,7 @@ function computeSlotStats(
     jitterBufferEmittedCount: inb.jitterBufferEmittedCount ?? 0,
     stalledPolls: 0,
     timestampMs: now,
+    fpsSmooth: 0,
   };
 
   let bitrateKbps = 0;
@@ -118,6 +123,8 @@ function computeSlotStats(
   }
 
   const fps = typeof inb.framesPerSecond === 'number' ? Math.round(inb.framesPerSecond) : 0;
+  // Moyenne glissante (~3 sondages) : un creux isolé ne fait pas passer la caméra en « dégradée »
+  counters.fpsSmooth = samePc && prev && prev.fpsSmooth > 0 ? Math.round((prev.fpsSmooth * 2 + fps) / 3) : fps;
   const rttMs = rttSec * 1000;
   const stats: ConnectionStats = {
     bitrateKbps: Math.round(bitrateKbps),
@@ -129,6 +136,7 @@ function computeSlotStats(
     jitterBufferMs: Math.round(jitterBufferMs),
     latencyMs: Math.round(rttMs / 2 + jitterBufferMs),
     peakFps: Math.max(peakFpsPrev, fps),
+    fpsSmooth: counters.fpsSmooth,
     stalledPolls: counters.stalledPolls,
     connectionState: pc.connectionState,
     updatedAt: now,

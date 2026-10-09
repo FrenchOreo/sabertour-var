@@ -30,6 +30,17 @@ en remplaçant l'ancienne ; sur Windows, lancer l'installateur. Menu *SABER VAR*
 *Run workflow* → choisir `patch` (correctif) ou `minor` (nouveautés). Dix minutes plus tard la
 release est en ligne avec les trois fichiers, et les applications installées la proposeront.
 
+**Tester avant de diffuser** : cocher en plus **« Pré-version à tester »**. La release est publiée
+mais les applications installées ne la proposent pas. On l'installe à la main sur l'ordinateur de
+test ; une fois validée en conditions réelles, éditer la release sur GitHub, décocher
+*pre-release* et cocher *Set as the latest release* : elle devient la version proposée à tous.
+
+**Revenir à une version qui marche** : toutes les versions restent sur la page des releases.
+Avant chaque mise à jour, dupliquer l'app dans Applications (Cmd+D) et la renommer
+« SABER VAR secours » ; en cas de problème, quitter l'app et ouvrir la copie. Réglages et QR codes
+sont conservés (stockage commun). Ne jamais lancer les deux en même temps, ne jamais supprimer
+une ancienne release, pas de mise à jour la semaine d'un tournoi.
+
 ## Installation depuis les sources (développeurs)
 
 ### Prérequis
@@ -109,8 +120,12 @@ Fabriquer l'application localement : `npm install` puis `npm run build:app:mac` 
   où l'action se passe), marque les **pics brusques ◆** (touche, parade ou clash — le
   clic s'aimante dessus) et resynchronise les caméras entre elles. Elle ne juge pas :
   elle pointe les moments à regarder. Touche `A` ou « Relancer l'analyse » pour refaire.
-- La **durée de la timeline est mesurée sur la vidéo réelle** (et plus estimée) : la
-  barre et le compteur d'images correspondent exactement au replay.
+- La **durée et la cadence de la timeline sont mesurées sur la vidéo réelle** (et plus
+  estimées) : la barre et le compteur d'images correspondent exactement au replay, et
+  chaque pas ← → cale **toutes** les caméras sur la même image (décalages de synchro
+  compris), quelle que soit la charge de l'ordinateur.
+- **Positions non équipées** (tournoi à 2 ou 3 caméras) : le bandeau reste **✅ PRÊT**, elles
+  sont simplement listées ; seule une caméra qui filmait et a disparu passe en ⚠.
 - **◆ précédent / suivant** (ou `Maj + ←/→`) : saute d'un impact à l'autre, le
   compteur indique « impact 2 / 5 ».
 - **−1f / +1f** sur chaque tuile : recalage manuel d'une caméra à la frame près.

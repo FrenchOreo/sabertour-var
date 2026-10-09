@@ -13,23 +13,35 @@ Ce signal sert à deux choses :
 ### 1. Marqueurs d'impacts sur la timeline
 
 Un impact (touche, parade, clash de lames) produit un pic brutal d'énergie de
-mouvement. Les pics dépassant un z-score robuste (médiane + MAD, donc insensible
-aux quelques impacts eux-mêmes) deviennent des **losanges orange** sur la
-timeline. Le clic s'aimante dessus : l'arbitre saute directement aux moments
-chauds au lieu de scruter 60 secondes de vidéo.
+mouvement. Un pic n'est retenu que s'il dépasse **à la fois** un z-score robuste
+de 5 (médiane + MAD, donc insensible aux quelques impacts eux-mêmes) **et** 3 fois
+le mouvement médian de la capture : un seuil de 3 seul laissait passer un faux
+pic par minute et noyait les vrais. Au plus 8 **losanges orange** par capture,
+les plus nets d'abord. Le clic s'aimante dessus : l'arbitre saute directement aux
+moments chauds au lieu de scruter 60 secondes de vidéo.
+
+La lecture d'analyse se fait à **4×** (toutes les caméras en parallèle) :
+`requestVideoFrameCallback` ne livre qu'une image par rafraîchissement d'écran,
+à 8× une image sur huit seulement était examinée et les impacts brefs passaient
+entre les mailles.
 
 **Limites assumées de la V1** : le signal ne distingue pas une touche valide
 d'une parade ou d'un clash — il marque les *candidats*. C'est une aide à la
-navigation, pas un juge : la décision reste à l'arbitre. Environ 5 à 12 marqueurs
-par capture selon l'intensité de l'échange.
+navigation, pas un juge : la décision reste à l'arbitre. Sur un banc d'essai
+(caméra simulée avec des « clashs » toutes les 6 s), deux pics sur trois sont
+de vrais impacts et un impact sur trois est manqué : viser la courbe orange
+autant que les losanges.
 
 ### 2. Synchro automatique des caméras
 
 Les 4 caméras filment la même scène : leurs signaux de mouvement sont corrélés.
 La **corrélation croisée** entre la caméra maître et chacune des autres donne le
-décalage temporel réel (précision ~50–100 ms, interpolation parabolique du pic),
-bien meilleure que l'alignement par heure d'arrivée des chunks. Si la corrélation
-est trop faible pour conclure, l'offset de la caméra n'est pas modifié.
+décalage temporel réel (interpolation parabolique du pic). Sa précision est celle
+de l'échantillonnage du signal (~100 ms) : elle ne corrige donc que les décalages
+**plus grands que ce pas** (caméra connectée en retard, rafale WiFi) et laisse
+intacte une synchro déjà bonne à l'image près — qu'elle aurait sinon dégradée en
+appliquant un « résidu » qui n'est que du bruit. Si la corrélation est trop
+faible pour conclure, l'offset de la caméra n'est pas modifié.
 
 En complément, chaque tuile a des boutons **−1f / +1f** pour un recalage manuel
 à la frame près (l'offset courant s'affiche en ms).
