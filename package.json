@@ -1,6 +1,6 @@
 {
   "name": "saber-var",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Système VAR pour Saber Tour — Vidéo arbitrage sabre laser",
   "main": "electron/main.js",
   "scripts": {
