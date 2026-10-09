@@ -30,6 +30,17 @@ en remplaçant l'ancienne ; sur Windows, lancer l'installateur. Menu *SABER VAR*
 *Run workflow* → choisir `patch` (correctif) ou `minor` (nouveautés). Dix minutes plus tard la
 release est en ligne avec les trois fichiers, et les applications installées la proposeront.
 
+**Tester avant de diffuser** : cocher en plus **« Pré-version à tester »**. La release est publiée
+mais les applications installées ne la proposent pas. On l'installe à la main sur l'ordinateur de
+test ; une fois validée en conditions réelles, éditer la release sur GitHub, décocher
+*pre-release* et cocher *Set as the latest release* : elle devient la version proposée à tous.
+
+**Revenir à une version qui marche** : toutes les versions restent sur la page des releases.
+Avant chaque mise à jour, dupliquer l'app dans Applications (Cmd+D) et la renommer
+« SABER VAR secours » ; en cas de problème, quitter l'app et ouvrir la copie. Réglages et QR codes
+sont conservés (stockage commun). Ne jamais lancer les deux en même temps, ne jamais supprimer
+une ancienne release, pas de mise à jour la semaine d'un tournoi.
+
 ## Installation depuis les sources (développeurs)
 
 ### Prérequis

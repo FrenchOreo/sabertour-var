@@ -17,6 +17,11 @@ on:
         required: true
         default: minor
         options: [patch, minor, major]
+      prerelease:
+        description: 'Pré-version à tester (les apps installées ne la proposeront pas tant qu''elle n''est pas validée)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -98,7 +103,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.bump.outputs.version }}
-          name: SABER VAR ${{ needs.bump.outputs.version }}
+          name: SABER VAR ${{ needs.bump.outputs.version }}${{ inputs.prerelease && ' (pré-version à tester)' || '' }}
+          # Pré-version : invisible pour la vérification de mise à jour des apps installées
+          # (elle ne lit que la dernière version officielle). Une fois validée sur le terrain :
+          # éditer la release, décocher « pre-release » et cocher « Set as the latest release ».
+          prerelease: ${{ inputs.prerelease }}
+          make_latest: ${{ inputs.prerelease && 'false' || 'true' }}
           generate_release_notes: true
           files: dist/*
           body: |
