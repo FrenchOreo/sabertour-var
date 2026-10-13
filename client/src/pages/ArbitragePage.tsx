@@ -13,7 +13,11 @@ import CameraTile from '../components/CameraTile';
 import VarTimeline from '../components/VarTimeline';
 import FrameCounter from '../components/FrameCounter';
 import ReadinessBanner from '../components/ReadinessBanner';
-import { SlotId, SlotState, WsMessage } from 'shared/types';
+import DiagnosticsPanel from '../components/DiagnosticsPanel';
+import { startRendererMonitor, takeRendererSample, diagLog, RendererSample } from '../lib/diagnostics';
+import { diagnoseCamera, worstCause, RecorderSample } from '../lib/diagnosis';
+import type { SystemMetrics } from '../types/electron';
+import { SlotId, SlotState, WsMessage, CameraTelemetry } from 'shared/types';
 
 const FPS_DEFAULT = 30;
 /** Délai minimal entre deux renégociations forcées d'une même caméra */
@@ -100,9 +104,17 @@ export default function ArbitragePage() {
   const wasRecordingBeforeVar = useRef(false);
   const recordingFolderBeforeVar = useRef<string | null>(null);
 
-  const { startRecording: startBufferRecording, stopRecording: stopBufferRecording, pauseAllRecording, resumeAllRecording, getBuffer, bufferDurations } = useVideoBuffer();
+  const { startRecording: startBufferRecording, stopRecording: stopBufferRecording, pauseAllRecording, resumeAllRecording, getBuffer, bufferDurations, takeRecorderSample } = useVideoBuffer();
   const recording = useRecording();
   const [bufferPaused, setBufferPaused] = useState(false);
+
+  // ============ Diagnostic : mesures réelles (téléphones, Mac, interface) ============
+  const [phoneStats, setPhoneStats] = useState<Map<SlotId, CameraTelemetry>>(new Map());
+  const [macMetrics, setMacMetrics] = useState<SystemMetrics | null>(null);
+  const [rendererSample, setRendererSample] = useState<RendererSample | null>(null);
+  const [recorderSample, setRecorderSample] = useState<Map<number, RecorderSample>>(new Map());
+  const [showDiag, setShowDiag] = useState(false);
+  const varPressedAt = useRef(0);
 
   // VAR history: store last N captures
   interface VarCapture {
@@ -182,6 +194,9 @@ export default function ArbitragePage() {
         break;
       case 'relay-offer': webrtcRef.current.handleOffer(msg.slotId, msg.sdp); break;
       case 'relay-ice': if (msg.from === 'camera') webrtcRef.current.handleIceCandidate(msg.slotId, msg.candidate); break;
+      case 'relay-camera-stats':
+        setPhoneStats((prev) => new Map(prev).set(msg.slotId, msg.stats));
+        break;
       case 'error': console.error('[Signaling error]', msg.message); break;
     }
   }, []);
@@ -196,6 +211,7 @@ export default function ArbitragePage() {
     if (Date.now() - last < RECONNECT_COOLDOWN_MS) return;
     lastReconnectAt.current.set(slotId, Date.now());
     console.warn(`[VAR] Flux caméra ${slotId} perdu (${reason}) — renégociation`);
+    diagLog('recover', { slot: slotId, reason });
     webrtcRef.current.reconnectSlot(slotId);
   }, []);
 
@@ -206,6 +222,7 @@ export default function ArbitragePage() {
       if (t) { clearTimeout(t); timers.delete(slotId); }
       return;
     }
+    diagLog('rtc-state', { slot: slotId, state });
     if (state === 'failed') {
       markFrozen(slotId);
       tryRecover(slotId, 'failed');
@@ -230,6 +247,53 @@ export default function ArbitragePage() {
 
   // Télémétrie WebRTC : santé réseau affichée en direct + latence par caméra pour la synchro VAR
   const { stats: connStats, getStatsSnapshot } = useConnectionStats(webrtc.getPeerConnection);
+
+  // Toutes les 5 s : mesures du Mac, de l'interface et de l'enregistrement → panneau + journal
+  const diagRefs = useRef({ connStats, phoneStats, slots, bufferDurations });
+  diagRefs.current = { connStats, phoneStats, slots, bufferDurations };
+  useEffect(() => {
+    startRendererMonitor();
+    diagLog('arbitre-open', { ua: navigator.userAgent });
+    let cancelled = false;
+    const tick = async () => {
+      const renderer = takeRendererSample();
+      const recorder = takeRecorderSample();
+      let mac: SystemMetrics | null = null;
+      try { mac = (await window.electronAPI?.getSystemMetrics?.()) ?? null; } catch { mac = null; }
+      if (cancelled) return;
+      setRendererSample(renderer);
+      setRecorderSample(recorder);
+      if (mac) setMacMetrics(mac);
+      const { connStats: rx, phoneStats: ph, slots: sl, bufferDurations: bd } = diagRefs.current;
+      const cams: Record<string, unknown> = {};
+      for (const slot of sl) {
+        if (!slot.cameraConnected) continue;
+        const r = rx.get(slot.slotId);
+        cams[slot.name] = {
+          rx: r ? { fps: r.fps, recv: r.receivedFps, dec: r.decodedFps, drop: r.droppedPerSec, decMs: r.decodeMsPerFrame, freezeMs: r.freezeMs, kbps: r.bitrateKbps, loss: r.lossPct, rtt: r.rttMs, w: r.width, h: r.height, stalled: r.stalledPolls } : null,
+          phone: ph.get(slot.slotId) ?? null,
+          rec: recorder.get(slot.slotId) ?? null,
+          bufferMs: bd.get(slot.slotId) ?? 0,
+        };
+      }
+      diagLog('snapshot', { mac, renderer, cams });
+    };
+    const id = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [takeRecorderSample]);
+
+  // Touche D : panneau Diagnostic (en direct comme en VAR)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.key === 'd' || e.key === 'D') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const tag = (e.target as HTMLElement | null)?.tagName;
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+        setShowDiag((x) => !x);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   // Flux gelé : la connexion se dit établie mais plus aucun octet n'arrive (téléphone rechargé, app en arrière-plan…)
   useEffect(() => {
@@ -280,8 +344,10 @@ export default function ArbitragePage() {
   const probeDurations = useCallback((urls: Map<SlotId, string>) => {
     const gen = ++probeGenRef.current;
     setProbedDurations(new Map());
+    const probeStart = performance.now();
     urls.forEach((url, slotId) => {
       probeBlobDuration(url).then((d) => {
+        diagLog('var-probe-duration', { slot: slotId, durationSec: d, ms: Math.round(performance.now() - probeStart) });
         if (d === null || probeGenRef.current !== gen) return;
         setProbedDurations((prev) => {
           const next = new Map(prev);
@@ -295,6 +361,7 @@ export default function ArbitragePage() {
     const master = urls.entries().next().value as [SlotId, string] | undefined;
     if (master) {
       probeBlobFrameRate(master[1]).then((measured) => {
+        diagLog('var-probe-fps', { slot: master[0], fps: measured, ms: Math.round(performance.now() - probeStart) });
         if (probeGenRef.current !== gen) return;
         if (measured !== null) setFps(snapFps(measured));
         setFpsProbeGen(gen);
@@ -319,11 +386,14 @@ export default function ArbitragePage() {
     const startTimes = new Map<SlotId, number>();
     let maxDurationMs = 0;
 
+    varPressedAt.current = performance.now();
+    const captureLog: Record<string, unknown> = {};
     for (const slot of slots) {
       const buffer = getBuffer(slot.slotId);
       if (buffer && buffer.hasData()) {
         const blob = buffer.getFullReplayBlob();
         if (blob) urls.set(slot.slotId, URL.createObjectURL(blob));
+        captureLog[slot.name] = { slot: slot.slotId, bytes: blob?.size ?? 0, mime: blob?.type, estMs: buffer.getReplayDurationMs() };
         const dur = buffer.getReplayDurationMs();
         if (dur > maxDurationMs) maxDurationMs = dur;
         const firstTs = buffer.getFirstChunkTimestamp();
@@ -336,6 +406,7 @@ export default function ArbitragePage() {
       }
     }
 
+    diagLog('var-press', { cams: captureLog });
     if (urls.size === 0) {
       setVarError('Buffer vide — attendre 30s après connexion des caméras');
       setTimeout(() => setVarError(null), 4000);
@@ -490,7 +561,12 @@ export default function ArbitragePage() {
 
   // ============ Analyse IA : détection d'impacts + synchro auto ============
   const runAnalysis = useCallback(async () => {
-    if (analysisStatus || varBlobs.size === 0) return;
+    if (analysisStatus || varBlobs.size === 0) {
+      diagLog('analysis-skip', { reason: analysisStatus ? 'déjà en cours' : 'aucune vidéo' });
+      return;
+    }
+    const analysisStart = performance.now();
+    diagLog('analysis-start', { cams: varBlobs.size, sinceVarMs: Math.round(analysisStart - varPressedAt.current) });
     const abort = { aborted: false };
     analysisAbortRef.current = abort;
     setAnalysisProgress(0);
@@ -519,9 +595,11 @@ export default function ArbitragePage() {
               setAnalysisProgress(sum / entries.length);
             },
           });
+          diagLog('analysis-camera', { slot: slotId, samples: sig.times.length, mediaEndSec: sig.times[sig.times.length - 1] ?? null, ms: Math.round(performance.now() - analysisStart) });
           if (sig.times.length > 10) signals.set(slotId, sig);
-        } catch {
+        } catch (err) {
           // caméra illisible — on continue avec les autres
+          diagLog('analysis-camera-error', { slot: slotId, error: String((err as Error)?.message ?? err), ms: Math.round(performance.now() - analysisStart) });
         }
       }));
       if (abort.aborted) return;
@@ -576,6 +654,7 @@ export default function ArbitragePage() {
         }
       }
 
+      diagLog('analysis-end', { master: masterSlotId, masterSamples: masterSig?.times.length ?? 0, markers: markerCount, synced, ms: Math.round(performance.now() - analysisStart) });
       if (!masterSig) {
         setAnalysisSummary('Analyse impossible sur cette capture');
       } else {
@@ -795,11 +874,18 @@ export default function ArbitragePage() {
   const readiness = computeReadiness(
     slots.map((s) => {
       const st = connStats.get(s.slotId);
+      const ph = phoneStats.get(s.slotId);
+      const health = st ? getHealth(st, ph) : undefined;
+      // Cause MESURÉE affichée dans le bandeau (pertes, bridage WiFi, Mac qui jette des images…)
+      const worst = health && health !== 'good'
+        ? worstCause(diagnoseCamera(st, ph, recorderSample.get(s.slotId)).filter((c) => c.severity !== 'info'))
+        : null;
       return {
         slotId: s.slotId,
         name: s.name,
         cameraConnected: s.cameraConnected,
-        health: st ? getHealth(st) : undefined,
+        health,
+        cause: worst?.text,
         frozen: frozenSlots.has(s.slotId),
         everConnected: everConnectedRef.current.has(s.slotId),
         bufferMs: bufferDurations.get(s.slotId) ?? 0,
@@ -873,6 +959,7 @@ export default function ArbitragePage() {
             {'\u2190'} 4 Caméras
           </button>
         )}
+        <button className="btn" style={{ fontSize: '0.7rem', padding: '4px 10px' }} onClick={() => setShowDiag((x) => !x)} title="Mesures réelles du WiFi, des téléphones et du Mac (touche D)">Diagnostic</button>
         <a href="/setup" className="btn" style={{ textDecoration: 'none', fontSize: '0.7rem', padding: '4px 10px' }}>Setup</a>
         <a href="/settings" className="btn" style={{ textDecoration: 'none', fontSize: '0.7rem', padding: '4px 10px' }}>Paramètres</a>
       </div>
@@ -883,7 +970,7 @@ export default function ArbitragePage() {
           <ReadinessBanner readiness={readiness} />
           <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gridTemplateRows: 'repeat(2, 1fr)', gap: 4, padding: 4, minHeight: 0 }}>
           {slots.map((slot) => (
-            <CameraTile key={slot.slotId} slot={slot} stream={streams.get(slot.slotId) || null} selected={false} onClick={() => setExpandedSlot(slot.slotId)} connectionStats={connStats.get(slot.slotId)} frozen={frozenSlots.has(slot.slotId)} />
+            <CameraTile key={slot.slotId} slot={slot} stream={streams.get(slot.slotId) || null} selected={false} onClick={() => setExpandedSlot(slot.slotId)} connectionStats={connStats.get(slot.slotId)} phoneStats={phoneStats.get(slot.slotId)} frozen={frozenSlots.has(slot.slotId)} />
           ))}
           {slots.length === 0 && (
             <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontFamily: 'var(--font-ui)', textTransform: 'uppercase' }}>
@@ -963,6 +1050,7 @@ export default function ArbitragePage() {
                   <PersistentVarVideo
                     slotId={slot.slotId}
                     blobUrl={blobUrl}
+                    startedAt={varPressedAt.current}
                     registerRef={(el) => { if (el) varVideoRefs.current.set(slot.slotId, el); else varVideoRefs.current.delete(slot.slotId); }}
                     zoom={isExpanded ? videoZoom : 1}
                   />
@@ -1084,6 +1172,18 @@ export default function ArbitragePage() {
       )}
 
       {varError && <div className="toast-error">{varError}</div>}
+
+      {showDiag && (
+        <DiagnosticsPanel
+          slots={slots}
+          rx={connStats}
+          phone={phoneStats}
+          recorder={recorderSample}
+          mac={macMetrics}
+          renderer={rendererSample}
+          onClose={() => setShowDiag(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1112,9 +1212,10 @@ function LiveExpandedVideo({ stream, zoom }: { stream: MediaStream; zoom: number
 }
 
 /** Persistent VAR video — mounted ONCE, never re-created during VAR mode */
-function PersistentVarVideo({ slotId, blobUrl, registerRef, zoom }: {
+function PersistentVarVideo({ slotId, blobUrl, registerRef, zoom, startedAt }: {
   slotId: SlotId;
   blobUrl: string;
+  startedAt: number;
   registerRef: (el: HTMLVideoElement | null) => void;
   zoom: number;
 }) {
@@ -1127,6 +1228,11 @@ function PersistentVarVideo({ slotId, blobUrl, registerRef, zoom }: {
     if (!el || srcSet.current) return;
     srcSet.current = true;
     registerRef(el);
+    // Journal : délai réel avant la première image affichée, ou erreur de lecture
+    const onReady = () => diagLog('var-video-ready', { slot: slotId, ms: Math.round(performance.now() - startedAt), w: el.videoWidth, h: el.videoHeight });
+    const onError = () => diagLog('var-video-error', { slot: slotId, code: el.error?.code ?? null, message: el.error?.message ?? null, ms: Math.round(performance.now() - startedAt) });
+    el.addEventListener('loadeddata', onReady, { once: true });
+    el.addEventListener('error', onError, { once: true });
     el.src = blobUrl;
     el.preload = 'auto';
     // Cleanup only on unmount

@@ -138,7 +138,9 @@ export function useWebRTCCamera({ slotId, stream, send, onStateChange }: UseWebR
 
   useEffect(() => () => clearReoffer(), []);
 
-  return { createOffer, handleAnswer, handleIceCandidate, close, connectionState };
+  const getPeerConnection = useCallback(() => pcRef.current, []);
+
+  return { createOffer, handleAnswer, handleIceCandidate, close, connectionState, getPeerConnection };
 }
 
 interface UseWebRTCArbitreOptions {

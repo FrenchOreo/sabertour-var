@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { SlotId } from 'shared/types';
+import { SlotId, CameraTelemetry } from 'shared/types';
 
 export interface ConnectionStats {
   bitrateKbps: number;
@@ -17,6 +17,15 @@ export interface ConnectionStats {
   fpsSmooth?: number;
   /** Sondages consécutifs sans aucun octet reçu alors que la connexion se dit établie */
   stalledPolls: number;
+  /** Compteurs RÉELS du récepteur (Mac) sur le dernier intervalle — null au premier sondage */
+  receivedFps?: number | null;
+  decodedFps?: number | null;
+  /** images reçues mais jetées par le Mac (décodage trop lent ou en retard), par seconde */
+  droppedPerSec?: number | null;
+  /** temps de décodage moyen par image sur le Mac (ms) */
+  decodeMsPerFrame?: number | null;
+  /** durée d'image figée constatée par le lecteur sur l'intervalle (ms) */
+  freezeMs?: number | null;
   connectionState: RTCPeerConnectionState;
   updatedAt: number;
 }
@@ -26,11 +35,24 @@ export type ConnectionHealth = 'good' | 'degraded' | 'bad';
 /** Nombre de sondages (2 s chacun) sans données à partir duquel le flux est déclaré gelé */
 export const STALL_POLLS_FROZEN = 3;
 
-export function getHealth(s: ConnectionStats): ConnectionHealth {
+export function getHealth(s: ConnectionStats, phone?: CameraTelemetry | null): ConnectionHealth {
   if (s.stalledPolls >= 2) return 'bad';
   if (s.lossPct > 5) return 'bad';
-  // Cadence jugée par rapport au meilleur fps vu sur cette caméra :
-  // à 60 fps demandés, recevoir 30 fps est déjà une dégradation
+  // Avec les mesures du téléphone, la cadence se juge par rapport à ce qu'il ENVOIE réellement :
+  // un capteur limité à 30 fps n'est pas un problème réseau
+  const sent = phone ? phone.encodedFps ?? phone.sourceFps : null;
+  if (phone && sent !== null && sent > 0) {
+    const got = s.fpsSmooth && s.fpsSmooth > 0 ? s.fpsSmooth : s.fps;
+    if (got > 0) {
+      const ratio = got / sent;
+      if (ratio < 0.5) return 'bad';
+      if (ratio < 0.8) return 'degraded';
+    }
+    if (s.lossPct > 1 || s.rttMs > 150) return 'degraded';
+    if ((phone.bandwidthLimitedShare ?? 0) > 0.5) return 'degraded';
+    return 'good';
+  }
+  // Sans mesures du téléphone : cadence jugée par rapport au meilleur fps vu sur cette caméra
   const ref = s.peakFps >= 20 ? s.peakFps : 0;
   const fps = s.fpsSmooth && s.fpsSmooth > 0 ? s.fpsSmooth : s.fps;
   if (ref > 0 && fps > 0) {
@@ -52,6 +74,11 @@ interface PrevCounters {
   stalledPolls: number;
   timestampMs: number;
   fpsSmooth: number;
+  framesReceived: number;
+  framesDecoded: number;
+  framesDropped: number;
+  totalDecodeTime: number;
+  totalFreezesDuration: number;
 }
 
 const POLL_INTERVAL_MS = 2000;
@@ -102,9 +129,19 @@ function computeSlotStats(
     stalledPolls: 0,
     timestampMs: now,
     fpsSmooth: 0,
+    framesReceived: inb.framesReceived ?? 0,
+    framesDecoded: inb.framesDecoded ?? 0,
+    framesDropped: inb.framesDropped ?? 0,
+    totalDecodeTime: inb.totalDecodeTime ?? 0,
+    totalFreezesDuration: inb.totalFreezesDuration ?? 0,
   };
 
   let bitrateKbps = 0;
+  let receivedFps: number | null = null;
+  let decodedFps: number | null = null;
+  let droppedPerSec: number | null = null;
+  let decodeMsPerFrame: number | null = null;
+  let freezeMs: number | null = null;
   let lossPct = 0;
   let jitterBufferMs = 0;
   if (samePc && prev && now > prev.timestampMs) {
@@ -118,6 +155,12 @@ function computeSlotStats(
     if (dEmitted > 0) {
       jitterBufferMs = ((counters.jitterBufferDelay - prev.jitterBufferDelay) / dEmitted) * 1000;
     }
+    const dDecoded = counters.framesDecoded - prev.framesDecoded;
+    receivedFps = Math.round((counters.framesReceived - prev.framesReceived) / dtSec);
+    decodedFps = Math.round(dDecoded / dtSec);
+    droppedPerSec = Math.round(Math.max(0, counters.framesDropped - prev.framesDropped) / dtSec * 10) / 10;
+    if (dDecoded > 0) decodeMsPerFrame = Math.round(((counters.totalDecodeTime - prev.totalDecodeTime) / dDecoded) * 10000) / 10;
+    freezeMs = Math.round(Math.max(0, counters.totalFreezesDuration - prev.totalFreezesDuration) * 1000);
     // Connexion « établie » mais plus aucun octet : le flux est gelé
     counters.stalledPolls = dBytes <= 0 && pc.connectionState === 'connected' ? prev.stalledPolls + 1 : 0;
   }
@@ -138,6 +181,11 @@ function computeSlotStats(
     peakFps: Math.max(peakFpsPrev, fps),
     fpsSmooth: counters.fpsSmooth,
     stalledPolls: counters.stalledPolls,
+    receivedFps,
+    decodedFps,
+    droppedPerSec,
+    decodeMsPerFrame,
+    freezeMs,
     connectionState: pc.connectionState,
     updatedAt: now,
   };

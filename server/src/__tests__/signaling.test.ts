@@ -169,4 +169,32 @@ describe('Signaling', () => {
       expect(relayMsg.slotId).toBe(3);
     }
   });
+
+  it('relays camera-stats from an authenticated camera to the arbitre only', async () => {
+    const arbitreWs = await createWs();
+    const cameraWs = await createWs();
+    const intruderWs = await createWs();
+
+    const slot = registry.getSlot(4 as SlotId)!;
+    const camMsgs = collectMessages(cameraWs, 2);
+    cameraWs.send(JSON.stringify({ type: 'camera-join', slotId: 4, token: slot.token, name: '' }));
+    await camMsgs;
+
+    const arbMsg = waitForMessage(arbitreWs);
+    arbitreWs.send(JSON.stringify({ type: 'arbitre-join' }));
+    await arbMsg;
+
+    const stats = { t: 1, requestedFps: 60, trackFps: 30, maxFps: 30, sourceFps: 30 };
+    // Un client non authentifié ne peut pas injecter de mesures pour le slot 4
+    intruderWs.send(JSON.stringify({ type: 'camera-stats', slotId: 4, stats: { ...stats, sourceFps: 1 } }));
+    const relayed = waitForMessage(arbitreWs);
+    cameraWs.send(JSON.stringify({ type: 'camera-stats', slotId: 4, stats }));
+    const msg = await relayed;
+
+    expect(msg.type).toBe('relay-camera-stats');
+    if (msg.type === 'relay-camera-stats') {
+      expect(msg.slotId).toBe(4);
+      expect(msg.stats.sourceFps).toBe(30);
+    }
+  });
 });

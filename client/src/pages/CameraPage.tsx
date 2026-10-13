@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useSignaling } from '../hooks/useSignaling';
 import { useWebRTCCamera } from '../hooks/useWebRTC';
-import { SlotId, WsMessage } from 'shared/types';
+import { SlotId, WsMessage, CameraTelemetry } from 'shared/types';
+import { computeCameraTelemetry, SenderCounters } from '../lib/telemetry';
 import { getResolutionConstraints, getResolution, setResolution, RESOLUTION_OPTIONS, Resolution, getFrameRate, setFrameRate, FRAMERATE_OPTIONS, FrameRate } from '../lib/qualitySettings';
 
 type CameraStatus = 'init' | 'permission' | 'connecting' | 'live' | 'reconnecting' | 'error';
@@ -140,6 +141,55 @@ export default function CameraPage() {
   const [rtcState, setRtcState] = useState<RTCPeerConnectionState>('new');
   const webrtc = useWebRTCCamera({ slotId, stream, send, onStateChange: setRtcState });
   webrtcRef.current = webrtc;
+
+  // Mesures réelles (compteurs WebRTC de l'émetteur + réglages de la caméra), envoyées à l'arbitre
+  // toutes les 2 s pour son panneau Diagnostic : cadence du capteur, bridage réseau/processeur, pertes
+  const [telemetry, setTelemetry] = useState<CameraTelemetry | null>(null);
+  const senderCountersRef = useRef<SenderCounters | undefined>(undefined);
+  const lastPcRef = useRef<RTCPeerConnection | null>(null);
+  useEffect(() => {
+    if (!stream) return;
+    let cancelled = false;
+    let battery: { level: number; charging: boolean } | null = null;
+    (navigator as Navigator & { getBattery?: () => Promise<{ level: number; charging: boolean }> })
+      .getBattery?.()
+      .then((b) => { battery = b; })
+      .catch(() => {});
+    const poll = async () => {
+      const pc = webrtcRef.current.getPeerConnection();
+      const track = stream.getVideoTracks()[0];
+      if (!pc || !track || pc.connectionState !== 'connected') return;
+      if (lastPcRef.current !== pc) { lastPcRef.current = pc; senderCountersRef.current = undefined; }
+      const settings = track.getSettings();
+      let maxFps: number | null = null;
+      try {
+        const caps = track.getCapabilities?.() as MediaTrackCapabilities | undefined;
+        if (caps?.frameRate && typeof caps.frameRate.max === 'number') maxFps = Math.round(caps.frameRate.max);
+      } catch { /* getCapabilities absent (anciens Safari) */ }
+      try {
+        const report = await pc.getStats();
+        if (cancelled) return;
+        const { telemetry: t, counters } = computeCameraTelemetry(
+          report.values() as Iterable<Record<string, unknown>>,
+          senderCountersRef.current,
+          {
+            requestedFps: getFrameRate(),
+            trackWidth: settings.width ?? null,
+            trackHeight: settings.height ?? null,
+            trackFps: typeof settings.frameRate === 'number' ? Math.round(settings.frameRate) : null,
+            maxFps,
+          },
+          Date.now(),
+          { pct: battery ? Math.round(battery.level * 100) : null, charging: battery ? battery.charging : null }
+        );
+        senderCountersRef.current = counters;
+        setTelemetry(t);
+        send({ type: 'camera-stats', slotId, stats: t });
+      } catch { /* connexion fermée entre-temps */ }
+    };
+    const id = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [stream, slotId, send]);
 
   // Get camera and join
   useEffect(() => {
@@ -315,6 +365,20 @@ export default function CameraPage() {
         {status === 'error' && (
           <div style={{ color: 'var(--red)', fontFamily: 'var(--font-mono)', fontSize: '0.85rem', marginBottom: 16 }}>
             {errorMsg}
+          </div>
+        )}
+
+        {status === 'live' && telemetry && (
+          <div className="font-mono" style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 12 }}>
+            capteur {telemetry.sourceFps ?? telemetry.trackFps ?? '?'} fps
+            {telemetry.maxFps ? ` (max ${telemetry.maxFps})` : ''}
+            {telemetry.sentKbps !== null ? ` · envoi ${(telemetry.sentKbps / 1000).toFixed(1)} Mb/s` : ''}
+            {telemetry.limitation === 'bandwidth' ? ' · bridé par le WiFi' : telemetry.limitation === 'cpu' ? ' · téléphone surchargé' : ''}
+          </div>
+        )}
+        {status === 'live' && telemetry?.maxFps !== null && telemetry?.maxFps !== undefined && telemetry.maxFps < telemetry.requestedFps - 5 && (
+          <div style={{ fontSize: '0.8rem', color: 'var(--orange)', maxWidth: 300, margin: '0 auto 12px' }}>
+            Ce téléphone filme au plus à {telemetry.maxFps} images/s (réglage demandé : {telemetry.requestedFps})
           </div>
         )}
 

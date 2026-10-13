@@ -92,6 +92,14 @@ export function setupSignaling(server: Server, registry: CameraRegistry): void {
           break;
         }
 
+        case 'camera-stats': {
+          // Seule une caméra authentifiée sur ce slot peut publier ses mesures
+          if (info.role !== 'camera' || info.slotId !== msg.slotId) return;
+          const arbitre = findClient('arbitre');
+          if (arbitre) sendTo(arbitre.ws, { type: 'relay-camera-stats', slotId: msg.slotId, stats: msg.stats });
+          break;
+        }
+
         case 'arbitre-join': {
           info.role = 'arbitre';
           sendTo(ws, { type: 'slots-state', slots: registry.getAllSlots() });

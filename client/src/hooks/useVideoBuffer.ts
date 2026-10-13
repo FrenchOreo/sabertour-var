@@ -103,6 +103,10 @@ export function useVideoBuffer() {
   const recordersRef = useRef<Map<number, MediaRecorder>>(new Map());
   const [bufferDurations, setBufferDurations] = useState<Map<number, number>>(new Map());
   const [recorderStatus, setRecorderStatus] = useState<Map<number, 'recording' | 'error' | 'idle'>>(new Map());
+  // Mesure réelle de la régularité de l'enregistrement : écart entre deux morceaux livrés par
+  // MediaRecorder (attendu ≈ 250 ms ; un Mac surchargé les livre en retard)
+  const chunkTimingRef = useRef<Map<number, { last: number; maxGap: number; chunks: number; gaps: number[]; mime: string }>>(new Map());
+  const pausedRef = useRef(false);
 
   const startRecording = useCallback((slotId: number, stream: MediaStream) => {
     // Cleanup existing
@@ -128,6 +132,17 @@ export function useVideoBuffer() {
     } as MediaRecorderOptions & { videoKeyFrameIntervalDuration: number });
 
     recorder.ondataavailable = async (e) => {
+      const nowMs = performance.now();
+      const timing = chunkTimingRef.current.get(slotId);
+      if (timing && timing.last > 0) {
+        const gap = nowMs - timing.last;
+        timing.maxGap = Math.max(timing.maxGap, gap);
+        timing.gaps.push(gap);
+        timing.chunks++;
+        timing.last = nowMs;
+      } else {
+        chunkTimingRef.current.set(slotId, { last: nowMs, maxGap: 0, chunks: 1, gaps: [], mime: recorder.mimeType || mimeType });
+      }
       if (e.data.size > 0) {
         const arrayBuffer = await e.data.arrayBuffer();
         buffer.addChunk(arrayBuffer, isFirstChunk);
@@ -175,12 +190,34 @@ export function useVideoBuffer() {
     });
   }, []);
 
+  /** Régularité mesurée depuis le dernier appel, par caméra (puis remise à zéro) */
+  const takeRecorderSample = useCallback((): Map<number, { maxGapMs: number; medianGapMs: number; chunks: number; mime: string }> => {
+    const out = new Map<number, { maxGapMs: number; medianGapMs: number; chunks: number; mime: string }>();
+    if (pausedRef.current) return out;
+    chunkTimingRef.current.forEach((v, slot) => {
+      // Un enregistreur muet depuis longtemps compte aussi comme un retard
+      const sinceLast = v.last > 0 ? performance.now() - v.last : 0;
+      const sorted = [...v.gaps].sort((a, b) => a - b);
+      out.set(slot, {
+        maxGapMs: Math.round(Math.max(v.maxGap, sinceLast)),
+        medianGapMs: Math.round(sorted.length ? sorted[sorted.length >> 1] : 0),
+        chunks: v.chunks,
+        mime: v.mime,
+      });
+      v.maxGap = 0;
+      v.chunks = 0;
+      v.gaps = [];
+    });
+    return out;
+  }, []);
+
   const stopRecording = useCallback((slotId: number) => {
     const recorder = recordersRef.current.get(slotId);
     if (recorder && recorder.state !== 'inactive') {
       recorder.stop();
     }
     recordersRef.current.delete(slotId);
+    chunkTimingRef.current.delete(slotId);
     setRecorderStatus((prev) => {
       const next = new Map(prev);
       next.set(slotId, 'idle');
@@ -189,6 +226,9 @@ export function useVideoBuffer() {
   }, []);
 
   const pauseAllRecording = useCallback(() => {
+    // En pause, l'absence de morceaux est voulue : pas de « retard » à mesurer
+    pausedRef.current = true;
+    chunkTimingRef.current.clear();
     recordersRef.current.forEach((recorder) => {
       if (recorder.state === 'recording') {
         try { recorder.pause(); } catch {}
@@ -197,6 +237,8 @@ export function useVideoBuffer() {
   }, []);
 
   const resumeAllRecording = useCallback(() => {
+    pausedRef.current = false;
+    chunkTimingRef.current.clear();
     recordersRef.current.forEach((recorder) => {
       if (recorder.state === 'paused') {
         try { recorder.resume(); } catch {}
@@ -208,5 +250,5 @@ export function useVideoBuffer() {
     return buffersRef.current.get(slotId);
   }, []);
 
-  return { startRecording, stopRecording, pauseAllRecording, resumeAllRecording, getBuffer, bufferDurations, recorderStatus };
+  return { startRecording, stopRecording, pauseAllRecording, resumeAllRecording, getBuffer, bufferDurations, recorderStatus, takeRecorderSample };
 }

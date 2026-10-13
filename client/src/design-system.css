@@ -408,3 +408,28 @@ html, body, #root {
   padding: 3px 4px 0;
 }
 .var-legend b { color: #ffb020; font-weight: 600; }
+
+/* ============ Panneau Diagnostic ============ */
+.diag-panel {
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(1100px, calc(100vw - 32px));
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+  z-index: 60;
+  background: rgba(10, 10, 15, 0.97);
+  border: 1px solid var(--cyan-border);
+  padding: 14px 16px;
+  box-shadow: 0 10px 40px #000a;
+}
+.diag-title {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
