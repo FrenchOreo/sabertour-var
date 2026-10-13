@@ -4,12 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/prepare-vision-assets.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/prepare-vision-assets.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.1.0",
     "qrcode": "^1.5.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

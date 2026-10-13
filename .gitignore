@@ -4,3 +4,5 @@ dist/
 *.pem
 .env
 release/
+client/public/mediapipe/
+client/public/models/

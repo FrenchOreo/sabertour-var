@@ -1,4 +1,4 @@
-# Détection de touches par IA — V1 implémentée et feuille de route
+# Détection de touches par IA — V1, V2 implémentées et feuille de route
 
 ## V1 — Assistance au replay (implémentée)
 
@@ -56,7 +56,52 @@ Même sans lancer l'analyse, la synchro initiale a été améliorée :
   `getStats()`) est soustraite des timestamps d'arrivée ;
 - le fps du replay est mesuré sur la caméra maître (plus de 30 fps codé en dur).
 
-## V2 — Modèle entraîné sur les vidéos existantes (feuille de route)
+## V2 — Silhouettes, lames et contacts (implémentée)
+
+La V1 ne voyait que du *mouvement*. La V2 regarde **qui** bouge et **avec quoi** :
+
+1. **Silhouettes** — modèle pré-entraîné **MediaPipe Pose Landmarker (lite)**, licence
+   Apache-2.0, ~6 Mo, embarqué dans l'app (WASM, hors-ligne). 33 points par personne,
+   jusqu'à 6 personnes par image (tireurs, arbitre, public). Il tourne dans un **Web
+   Worker** : l'interface reste fluide pendant l'analyse. Au chargement, le worker
+   **chronomètre le GPU et le processeur** sur une image d'essai et garde le plus rapide
+   (mesuré sur une machine sans GPU utilisable : le « GPU » logiciel était 20 à 28× plus lent).
+2. **Lames** — pas d'apprentissage : une lame LED est une ligne **lumineuse et saturée**
+   (ou blanche saturée au cœur). On cherche, depuis chaque main détectée, la direction
+   où un trait lumineux continu, fin et dense part de la main (lancer de rayons tous les 4°).
+   Rejets : tache large (veste blanche, fenêtre), trait qui ne part pas de la main (lame
+   d'un autre), prolongement de l'avant-bras (manche claire).
+3. **Tireurs** — les deux personnes armées les plus grandes et proches l'une de l'autre.
+4. **Contact** — la lame (hors son premier quart, côté main) contre des « capsules » du
+   corps adverse : tête, torse, bras, jambes. Zone et distance mesurées à chaque image.
+   **Croisement** — les deux lames se coupent (hors premier quart : des mains proches
+   ne sont pas un croisement).
+5. **Événements** — les images en contact consécutives forment une touche, datée à
+   l'image où la lame est le plus enfoncée ; puis **fusion entre caméras** (décalages de
+   synchro appliqués) : une lame qui passe *devant* un corps ne le touche que sous un seul
+   angle, une touche vue par 2 caméras est plus sûre et passe en tête des marqueurs.
+
+Lecture : une seule passe par vidéo donne à la fois le signal de mouvement et les images
+envoyées au modèle (~12 par seconde de vidéo). Les **15 dernières secondes d'abord**. La
+vitesse de lecture s'adapte au temps d'analyse mesuré (1× à 4×). Au plus 2 vidéos en même
+temps. Un gel du décodeur est relancé puis contourné au lieu d'interrompre l'analyse ; un
+**trou dans l'enregistrement** (flux figé pendant le direct) est mesuré et signalé.
+
+**Banc d'essai** (test de bout en bout, 2 téléphones simulés filmant un duel synthétique
+— vraie photo détourée, lames LED animées, touche à la jambe et croisement toutes les 5 s) :
+les deux tireurs et leurs lames sont trouvés sur 100 % des images analysées ; chaque
+événement détecté tombe au bon moment du cycle et dans la bonne zone, aucun faux
+événement. Sur la machine de test (4 cœurs partagés avec les téléphones simulés, sans
+GPU) le modèle ne traite que 4–8 images/s et rate une partie des touches de 0,6 s ; la
+vitesse réelle sur le Mac de l'arbitre sera mesurée au premier tournoi. Le journal (`vision-camera`, `analysis-end`) donne les
+chiffres réels de chaque analyse : images analysées, temps par image, part des images où
+tireurs et lames sont vus, contacts, blocages, trous.
+
+**Limites** : lames peu lumineuses (salle très éclairée, caméra surexposée), tireurs coupés
+par le cadre, ou de dos, chevauchement des silhouettes. La **Vue IA** (`V`) montre
+exactement ce que le modèle a vu pour juger sur pièce.
+
+## V3 — Modèle entraîné sur les vidéos existantes (feuille de route)
 
 Avec les enregistrements de combats déjà disponibles (>50 combats), on peut
 passer d'une détection « impacts candidats » à une vraie détection de touches :
@@ -71,8 +116,8 @@ passer d'une détection « impacts candidats » à une vraie détection de touch
    - la **zone touchée** (tête / tronc / bras / jambe / main),
    - le **tireur qui touche** (gauche / droite),
    - les négatifs difficiles : parades, clashs lame-lame, quasi-touches.
-3. Ordre de grandeur pour une V2 utile : 500–1000 événements annotés
-   (≈ 2–4 tournois). Les faux positifs de la V1 confirmés/rejetés par l'arbitre
+3. Ordre de grandeur pour une V3 utile : 500–1000 événements annotés
+   (≈ 2–4 tournois). Les faux positifs de la V2 confirmés/rejetés par l'arbitre
    sont la source d'annotation la moins chère — à instrumenter dans l'app
    (log JSONL des verdicts via IPC Electron).
 

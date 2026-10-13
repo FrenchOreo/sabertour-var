@@ -233,6 +233,11 @@ async function createWindow() {
   console.log('');
 }
 
+// Analyse IA : MediaPipe passe toujours par WebGL pour lire les images. Sans carte graphique
+// utilisable (pilote bloqué, machine virtuelle), Chromium bascule alors sur son rendu logiciel
+// au lieu de rendre l'analyse impossible ; sans effet quand le GPU fonctionne.
+app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {

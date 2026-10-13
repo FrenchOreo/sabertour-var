@@ -280,7 +280,7 @@ export function extractMotionSignal(blobUrl: string, opts: ExtractOptions = {}):
     // Doit rester composité pour que requestVideoFrameCallback tire à chaque frame
     Object.assign(video.style, {
       position: 'fixed', bottom: '0', right: '0', width: '2px', height: '2px',
-      opacity: '0.01', pointerEvents: 'none', zIndex: '-1',
+      opacity: '0.01', pointerEvents: 'none', zIndex: '2147483647',
     });
     document.body.appendChild(video);
 

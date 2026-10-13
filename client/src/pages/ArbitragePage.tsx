@@ -4,7 +4,7 @@ import { useWebRTCArbitre } from '../hooks/useWebRTC';
 import { useVideoBuffer } from '../hooks/useVideoBuffer';
 import { useRecording } from '../hooks/useRecording';
 import { useConnectionStats, getHealth, STALL_POLLS_FROZEN } from '../hooks/useConnectionStats';
-import { extractMotionSignal, findImpactSpikes, estimateOffsetSec, buildDisplayCurve, MotionSignal } from '../lib/varAnalysis';
+import { findImpactSpikes, estimateOffsetSec, buildDisplayCurve, MotionSignal } from '../lib/varAnalysis';
 import { probeBlobDuration, probeBlobFrameRate, snapFrameRate } from '../lib/videoDuration';
 import { computeReadiness } from '../lib/readiness';
 import { adjacentMarker, currentMarkerIndex } from '../lib/markers';
@@ -14,6 +14,11 @@ import VarTimeline from '../components/VarTimeline';
 import FrameCounter from '../components/FrameCounter';
 import ReadinessBanner from '../components/ReadinessBanner';
 import DiagnosticsPanel from '../components/DiagnosticsPanel';
+import VisionOverlay from '../components/VisionOverlay';
+import { analyzeClip } from '../lib/vision/analyzeClip';
+import { acquireVision, visionFailure, warmUpVision, MAX_WORKERS } from '../lib/vision/visionPool';
+import { framesToEvents, fuseEvents, selectMarkers, CamEvent, FusedEvent } from '../lib/vision/events';
+import type { VisionFrame, VisionStats } from '../lib/vision/types';
 import { startRendererMonitor, takeRendererSample, diagLog, RendererSample } from '../lib/diagnostics';
 import { diagnoseCamera, worstCause, RecorderSample } from '../lib/diagnosis';
 import type { SystemMetrics } from '../types/electron';
@@ -67,6 +72,10 @@ export default function ArbitragePage() {
 
   // Analyse IA (détection d'impacts + synchro auto)
   const [impactMarkers, setImpactMarkers] = useState<number[]>([]);
+  // Ce que l'IA a vu, par caméra (temps média) → « Vue IA » ; événements retenus (temps timeline)
+  const visionFramesRef = useRef<Map<SlotId, VisionFrame[]>>(new Map());
+  const [visionEvents, setVisionEvents] = useState<FusedEvent[]>([]);
+  const [showVision, setShowVision] = useState(false);
   const [analysisStatus, setAnalysisStatus] = useState<string | null>(null);
   const [analysisSummary, setAnalysisSummary] = useState<string | null>(null);
   const analysisAbortRef = useRef<{ aborted: boolean } | null>(null);
@@ -282,6 +291,20 @@ export default function ArbitragePage() {
     return () => { cancelled = true; clearInterval(id); };
   }, [takeRecorderSample]);
 
+  // Modèle de silhouettes chargé en avance (quelques secondes, une seule fois) : la première
+  // analyse VAR démarre aussitôt au lieu d'attendre le chargement
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const t0 = performance.now();
+      warmUpVision(1);
+      acquireVision().then((lease) => {
+        lease?.release();
+        diagLog('vision-ready', { ok: !!lease, delegate: lease?.worker.delegate ?? null, benchMs: lease?.worker.benchMs ?? null, error: visionFailure(), ms: Math.round(performance.now() - t0) });
+      });
+    }, 3000);
+    return () => clearTimeout(t);
+  }, []);
+
   // Touche D : panneau Diagnostic (en direct comme en VAR)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -407,6 +430,8 @@ export default function ArbitragePage() {
     }
 
     diagLog('var-press', { cams: captureLog });
+    // 2e moteur d'analyse chargé pendant la mesure de cadence, avant l'analyse
+    warmUpVision();
     if (urls.size === 0) {
       setVarError('Buffer vide — attendre 30s après connexion des caméras');
       setTimeout(() => setVarError(null), 4000);
@@ -441,6 +466,8 @@ export default function ArbitragePage() {
     setAnalysisSummary(null);
     setImpactMarkers([]);
     setMotionSignal(null);
+    setVisionEvents([]);
+    visionFramesRef.current = new Map();
 
     probeDurations(urls);
     autoAnalysisArmed.current = true;
@@ -474,6 +501,8 @@ export default function ArbitragePage() {
     setAnalysisSummary(null);
     setImpactMarkers([]);
     setMotionSignal(null);
+    setVisionEvents([]);
+    visionFramesRef.current = new Map();
 
     // Save current capture to history (blobs kept alive)
     if (varBlobs.size > 0) {
@@ -529,6 +558,8 @@ export default function ArbitragePage() {
     setAnalysisSummary(null);
     setImpactMarkers([]);
     setMotionSignal(null);
+    setVisionEvents([]);
+    visionFramesRef.current = new Map();
 
     probeDurations(capture.blobs);
     autoAnalysisArmed.current = true;
@@ -559,47 +590,96 @@ export default function ArbitragePage() {
     }
   }, [bufferPaused, pauseAllRecording, resumeAllRecording]);
 
-  // ============ Analyse IA : détection d'impacts + synchro auto ============
+  // ============ Analyse IA : silhouettes + lames (contacts), mouvement, synchro auto ============
   const runAnalysis = useCallback(async () => {
     if (analysisStatus || varBlobs.size === 0) {
       diagLog('analysis-skip', { reason: analysisStatus ? 'déjà en cours' : 'aucune vidéo' });
       return;
     }
     const analysisStart = performance.now();
-    diagLog('analysis-start', { cams: varBlobs.size, sinceVarMs: Math.round(analysisStart - varPressedAt.current) });
+    diagLog('analysis-start', { cams: varBlobs.size, sinceVarMs: Math.round(analysisStart - varPressedAt.current), visionFailure: visionFailure() });
     const abort = { aborted: false };
     analysisAbortRef.current = abort;
     setAnalysisProgress(0);
     const expected = varDurationMs / 1000;
-    const entries = [...varBlobs.entries()];
-    const masterSlotId = getMasterEntry()?.[0] ?? entries[0][0];
+    const masterSlotId = getMasterEntry()?.[0] ?? [...varBlobs.keys()][0];
+    // Caméra maître d'abord : c'est elle qui donne la courbe et les premiers marqueurs
+    const entries = [...varBlobs.entries()].sort((a, b) => (a[0] === masterSlotId ? -1 : b[0] === masterSlotId ? 1 : 0));
+    visionFramesRef.current = new Map();
+    setVisionEvents([]);
+
+    // Marqueurs de l'IA : recalculés au fil de l'eau (~3 fois/s) à partir des contacts vus
+    const camEventsOf = (frames: VisionFrame[]) =>
+      framesToEvents(frames.map((f) => ({ t: f.t, contact: f.contact ? { zone: f.contact.zone, gap: f.contact.gap } : null, clash: f.clash !== null })));
+    const computeVisionMarkers = (offsets: Map<SlotId, number>) => {
+      const perCam = new Map<number, CamEvent[]>();
+      visionFramesRef.current.forEach((frames, slotId) => perCam.set(slotId, camEventsOf(frames)));
+      return selectMarkers(fuseEvents(perCam, offsets as Map<number, number>));
+    };
+    let lastMarkerUpdate = 0;
+    const onVisionFrame = (slotId: SlotId, f: VisionFrame) => {
+      if (abort.aborted) return;
+      const list = visionFramesRef.current.get(slotId) ?? [];
+      list.push(f);
+      visionFramesRef.current.set(slotId, list);
+      if (!f.contact && !f.clash) return;
+      const now = performance.now();
+      if (now - lastMarkerUpdate < 300) return;
+      lastMarkerUpdate = now;
+      const ev = computeVisionMarkers(varOffsets);
+      setVisionEvents(ev);
+      setImpactMarkers(ev.map((e) => e.t * 1000).filter((ms) => ms >= 0));
+    };
 
     try {
       const signals = new Map<SlotId, MotionSignal>();
+      const visionStats = new Map<SlotId, VisionStats>();
+      // Trous mesurés dans les vidéos (aucune image pendant > 0,5 s : flux gelé pendant le direct)
+      const holesBySlot = new Map<SlotId, [number, number][]>();
       setAnalysisStatus(`Analyse de ${entries.length} caméra${entries.length > 1 ? 's' : ''}…`);
-      // Toutes les caméras en parallèle (le décodage est multi-cœur) : ~4× plus rapide qu'en série
       const progress = new Map<SlotId, number>();
-      await Promise.all(entries.map(async ([slotId, url]) => {
-        try {
-          const sig = await extractMotionSignal(url, {
-            expectedDurationSec: expected,
-            abort,
-            onProgress: (f) => {
-              progress.set(slotId, f);
-              // ~10 mises à jour/s suffisent pour la barre de progression de la timeline
-              const now = performance.now();
-              if (now - lastProgressUpdate.current < 100) return;
-              lastProgressUpdate.current = now;
-              let sum = 0;
-              progress.forEach((p) => { sum += p; });
-              setAnalysisProgress(sum / entries.length);
-            },
-          });
-          diagLog('analysis-camera', { slot: slotId, samples: sig.times.length, mediaEndSec: sig.times[sig.times.length - 1] ?? null, ms: Math.round(performance.now() - analysisStart) });
-          if (sig.times.length > 10) signals.set(slotId, sig);
-        } catch (err) {
-          // caméra illisible — on continue avec les autres
-          diagLog('analysis-camera-error', { slot: slotId, error: String((err as Error)?.message ?? err), ms: Math.round(performance.now() - analysisStart) });
+      const onProgress = (slotId: SlotId, f: number) => {
+        progress.set(slotId, f);
+        // ~10 mises à jour/s suffisent pour la barre de progression de la timeline
+        const now = performance.now();
+        if (now - lastProgressUpdate.current < 100) return;
+        lastProgressUpdate.current = now;
+        let sum = 0;
+        progress.forEach((p) => { sum += p; });
+        setAnalysisProgress(sum / entries.length);
+      };
+
+      // Au plus MAX_WORKERS vidéos décodées + analysées en même temps (au-delà, le Mac sature et
+      // tout ralentit) ; sans modèle de vision, toutes en parallèle comme avant
+      const queue = [...entries];
+      const lanes = visionFailure() ? entries.length : Math.min(MAX_WORKERS, entries.length);
+      await Promise.all(Array.from({ length: lanes }, async () => {
+        for (let next = queue.shift(); next && !abort.aborted; next = queue.shift()) {
+          const [slotId, url] = next;
+          const lease = visionFailure() ? null : await acquireVision();
+          try {
+            const res = await analyzeClip(url, {
+              worker: lease?.worker ?? null,
+              durationSec: probedDurations.get(slotId) ?? expected,
+              abort,
+              onProgress: (f) => onProgress(slotId, f),
+              onVisionFrame: (f) => onVisionFrame(slotId, f),
+            });
+            const sig = res.motion;
+            if (sig.times.length > 10) signals.set(slotId, sig);
+            if (lease) visionStats.set(slotId, res.stats);
+            if (res.stats.holes?.length) holesBySlot.set(slotId, res.stats.holes);
+            diagLog('analysis-camera', {
+              slot: slotId, samples: sig.times.length, mediaEndSec: sig.times[sig.times.length - 1] ?? null,
+              wallMs: res.wallMs, ms: Math.round(performance.now() - analysisStart),
+            });
+            diagLog('vision-camera', { slot: slotId, ...(lease ? res.stats : { error: visionFailure() ?? 'modèle indisponible' }) });
+          } catch (err) {
+            // caméra illisible — on continue avec les autres
+            diagLog('analysis-camera-error', { slot: slotId, error: String((err as Error)?.message ?? err), ms: Math.round(performance.now() - analysisStart) });
+          } finally {
+            lease?.release();
+          }
         }
       }));
       if (abort.aborted) return;
@@ -615,24 +695,17 @@ export default function ArbitragePage() {
         values: sig.values,
       });
 
-      let markerCount = 0;
       let synced = 0;
+      let offsetsAfter = varOffsets;
+      let spikes: number[] = [];
       if (masterSig) {
         const masterAdj = toTimeline(masterSig, masterOffset);
         setMotionSignal(masterAdj);
-
-        // Marqueurs d'impacts (déjà en temps timeline)
-        const spikes = findImpactSpikes(masterAdj);
-        // Pas de borne haute : la durée réelle peut n'être connue qu'après l'analyse,
-        // et c'est justement la fin du replay qui manquait à l'estimation
-        const markers = spikes.map((s) => s * 1000).filter((ms) => ms >= 0);
-        setImpactMarkers(markers);
-        markerCount = markers.length;
+        spikes = findImpactSpikes(masterAdj).map((s) => s * 1000).filter((ms) => ms >= 0);
 
         // Synchro auto : les caméras filment la même scène, la corrélation croisée
         // de leurs signaux de mouvement donne le décalage réel entre elles.
-        // Les signaux sont échantillonnés à ~10 images/s : la corrélation ne vaut qu'à cette
-        // précision près. On ne corrige que les décalages plus grands que ce pas — un petit
+        // On ne corrige que les décalages plus grands que le pas d'échantillonnage — un petit
         // « résidu » n'est que du bruit et dégraderait une synchro déjà bonne (±1 image).
         const newOffsets = new Map(varOffsets);
         const masterStep = medianStep(masterAdj.times);
@@ -647,6 +720,7 @@ export default function ArbitragePage() {
           }
         }
         if (synced > 0) {
+          offsetsAfter = newOffsets;
           setVarOffsets(newOffsets);
           varVideoRefs.current.forEach((v, slotId) => {
             v.currentTime = frameToMedia(frameCounterRef.current, newOffsets.get(slotId) || 0);
@@ -654,16 +728,55 @@ export default function ArbitragePage() {
         }
       }
 
-      diagLog('analysis-end', { master: masterSlotId, masterSamples: masterSig?.times.length ?? 0, markers: markerCount, synced, ms: Math.round(performance.now() - analysisStart) });
-      if (!masterSig) {
+      // Marqueurs : touches / croisements vus par l'IA (avec la synchro finale) ;
+      // à défaut, les pics brusques de mouvement
+      const events = computeVisionMarkers(offsetsAfter);
+      const touches = events.filter((e) => e.kind === 'touche');
+      const clashes = events.length - touches.length;
+      const markers = events.length > 0 ? events.map((e) => e.t * 1000).filter((ms) => ms >= 0) : spikes;
+      setVisionEvents(events);
+      setImpactMarkers(markers);
+
+      const stats = [...visionStats.values()];
+      const framesAnalysed = stats.reduce((s, x) => s + x.framesAnalysed, 0);
+      const bladePct = framesAnalysed ? Math.round((stats.reduce((s, x) => s + x.bladeShare * x.framesAnalysed, 0) / framesAnalysed) * 100) : 0;
+      const fighterPct = framesAnalysed ? Math.round((stats.reduce((s, x) => s + x.fightersShare * x.framesAnalysed, 0) / framesAnalysed) * 100) : 0;
+      diagLog('analysis-end', {
+        master: masterSlotId, masterSamples: masterSig?.times.length ?? 0, synced,
+        visionCams: visionStats.size, framesAnalysed, fighterPct, bladePct, holes: Object.fromEntries(holesBySlot),
+        touches: touches.length, clashes, spikes: spikes.length, markers: markers.length,
+        events: events.map((e) => ({ t: Math.round(e.t * 1000) / 1000, kind: e.kind, cams: e.cams, zone: e.zone ?? null, frames: e.frames })),
+        ms: Math.round(performance.now() - analysisStart),
+      });
+
+      // Plus long gel d'une vidéo (≥ 1 s) : l'arbitre sait qu'il manque des images à cet endroit
+      let worstHole: { slotId: SlotId; at: number; dur: number } | null = null;
+      holesBySlot.forEach((holes, slotId) => {
+        for (const [at, dur] of holes) if (dur >= 1 && (!worstHole || dur > worstHole.dur)) worstHole = { slotId, at, dur };
+      });
+      const holeTxt = (() => {
+        if (!worstHole) return '';
+        const h = worstHole as { slotId: SlotId; at: number; dur: number };
+        const name = slots.find((x) => x.slotId === h.slotId)?.name ?? `caméra ${h.slotId}`;
+        return ` · ⚠ ${name} gelée ${h.dur.toFixed(1).replace('.', ',')} s à ${formatTime(Math.max(0, h.at - (offsetsAfter.get(h.slotId) || 0)))}`;
+      })();
+      const syncTxt = synced > 0 ? ` · ${synced} caméra${synced > 1 ? 's' : ''} resynchronisée${synced > 1 ? 's' : ''}` : '';
+      if (!masterSig && signals.size === 0) {
         setAnalysisSummary('Analyse impossible sur cette capture');
+      } else if (events.length > 0) {
+        const multi = touches.filter((e) => e.cams.length > 1).length;
+        const parts = [
+          touches.length ? `🎯 ${touches.length} touche${touches.length > 1 ? 's' : ''} possible${touches.length > 1 ? 's' : ''}${multi ? ` (${multi} vue${multi > 1 ? 's' : ''} par 2 caméras+)` : ''}` : '',
+          clashes ? `⚔ ${clashes} croisement${clashes > 1 ? 's' : ''}` : '',
+        ].filter(Boolean);
+        setAnalysisSummary(`${parts.join(' · ')}${syncTxt}${holeTxt} — ◆ pour naviguer · V = vue IA`);
       } else {
-        const syncTxt = synced > 0 ? ` · ${synced} caméra${synced > 1 ? 's' : ''} resynchronisée${synced > 1 ? 's' : ''}` : '';
-        if (markerCount === 0) {
-          setAnalysisSummary(`Aucun mouvement brusque détecté${syncTxt}`);
-        } else {
-          setAnalysisSummary(`⚡ ${markerCount} pic${markerCount > 1 ? 's' : ''} de mouvement${syncTxt} — ◆ pour naviguer`);
-        }
+        const why = visionStats.size === 0
+          ? `IA indisponible${visionFailure() ? ` (${visionFailure()})` : ''}`
+          : fighterPct < 20 ? `IA : tireurs vus sur ${fighterPct} % des images`
+          : `IA : lames vues sur ${bladePct} % des images, aucun contact`;
+        const spikeTxt = spikes.length ? `⚡ ${spikes.length} pic${spikes.length > 1 ? 's' : ''} de mouvement` : 'aucun mouvement brusque';
+        setAnalysisSummary(`${spikeTxt} · ${why}${syncTxt}${holeTxt}`);
       }
     } finally {
       if (analysisAbortRef.current === abort) {
@@ -672,7 +785,7 @@ export default function ArbitragePage() {
         analysisAbortRef.current = null;
       }
     }
-  }, [analysisStatus, varBlobs, varDurationMs, varOffsets, getMasterEntry, frameToMedia]);
+  }, [analysisStatus, varBlobs, varDurationMs, varOffsets, getMasterEntry, frameToMedia, probedDurations, slots]);
 
   // Ajustement manuel de synchro : décale une caméra de ±1 frame
   const nudgeCamera = useCallback((slotId: SlotId, deltaFrames: number) => {
@@ -840,6 +953,7 @@ export default function ArbitragePage() {
         case '3': handleSpeedChange(0.25); break;
         case '4': handleSpeedChange(0.1); break;
         case 'a': case 'A': runAnalysis(); break;
+        case 'v': case 'V': setShowVision((x) => !x); break;
         case 'Escape':
           if (expandedSlot) { setExpandedSlot(null); setVideoZoom(1); pauseAll(); }
           else exitVarMode();
@@ -928,9 +1042,16 @@ export default function ArbitragePage() {
           className="var-ctl analyse"
           onClick={runAnalysis}
           disabled={analysing}
-          title="Lancée automatiquement à l'entrée en VAR : mesure l'intensité du mouvement (courbe orange), marque les pics brusques (◆) et resynchronise les caméras. Touche A pour relancer."
+          title="Lancée automatiquement à l'entrée en VAR : repère les tireurs et leurs lames, marque les contacts lame-corps et les croisements (◆), mesure le mouvement (courbe orange) et resynchronise les caméras. Touche A pour relancer."
         >
           {analysing ? `⏳ ${Math.round((analysisProgress ?? 0) * 100)} %` : motionSignal ? '↻ RELANCER L\'ANALYSE' : '⚡ ANALYSE IA'}
+        </button>
+        <button
+          className={`var-ctl ${showVision ? 'active' : ''}`}
+          onClick={() => setShowVision((x) => !x)}
+          title="Affiche ce que l'IA a vu : squelettes des tireurs, lames, contacts (touche V)"
+        >
+          {showVision ? '👁 VUE IA ✓' : '👁 VUE IA'}
         </button>
         {analysisSummary && <span className="var-summary font-mono">{analysisSummary}</span>}
         <button className="btn-live var-ctl-live" onClick={exitVarMode} title="Retour au direct (Échap)">
@@ -1054,6 +1175,13 @@ export default function ArbitragePage() {
                     registerRef={(el) => { if (el) varVideoRefs.current.set(slot.slotId, el); else varVideoRefs.current.delete(slot.slotId); }}
                     zoom={isExpanded ? videoZoom : 1}
                   />
+                  {showVision && (
+                    <VisionOverlay
+                      video={varVideoRefs.current.get(slot.slotId) ?? null}
+                      getFrames={() => visionFramesRef.current.get(slot.slotId)}
+                      zoom={isExpanded ? videoZoom : 1}
+                    />
+                  )}
                   {!expandedSlot && (
                     <div className="label" style={{ color: 'var(--red)' }}>{slot.name}</div>
                   )}
@@ -1101,7 +1229,7 @@ export default function ArbitragePage() {
             <VarTimeline durationMs={varDurationMs} currentTimeMs={currentTimeDisplay * 1000} fps={fps} onSeek={handleSeek} markers={impactMarkers} analysisProgress={analysisProgress} curve={motionCurve} />
             {motionCurve && (
               <div className="var-legend">
-                <b>Courbe orange</b> = intensité du mouvement · <b>◆</b> = pic brusque (touche, parade ou clash) · l'analyse pointe les moments à regarder, l'arbitre décide
+                <b>Courbe orange</b> = intensité du mouvement · <b>◆</b> = {visionEvents.length > 0 ? 'contact lame-corps ou croisement vu par l\'IA' : 'pic brusque de mouvement'} · <b>V</b> = vue IA · l'analyse pointe les moments à regarder, l'arbitre décide
               </div>
             )}
           </div>
