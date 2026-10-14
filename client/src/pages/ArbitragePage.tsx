@@ -14,6 +14,7 @@ import VarTimeline from '../components/VarTimeline';
 import FrameCounter from '../components/FrameCounter';
 import ReadinessBanner from '../components/ReadinessBanner';
 import DiagnosticsPanel from '../components/DiagnosticsPanel';
+import BatchPanel from '../components/BatchPanel';
 import VisionOverlay from '../components/VisionOverlay';
 import { analyzeClip } from '../lib/vision/analyzeClip';
 import { acquireVision, visionFailure, warmUpVision, MAX_WORKERS } from '../lib/vision/visionPool';
@@ -55,6 +56,12 @@ function formatTime(sec: number): string {
 
 export default function ArbitragePage() {
   const [slots, setSlots] = useState<SlotState[]>([]);
+  // Écran VAR sans caméras configurées (vidéos ouvertes depuis des fichiers, à la maison) :
+  // les 4 positions habituelles servent de cases d'affichage
+  const varSlots = useMemo<SlotState[]>(
+    () => (slots.length ? slots : ['GAUCHE', 'DROITE', 'FOND', 'JUGE'].map((name, i) => ({ slotId: (i + 1) as SlotId, name, cameraConnected: false, arbitreConnected: false, token: '' }))),
+    [slots]
+  );
   const [streams, setStreams] = useState<Map<SlotId, MediaStream>>(new Map());
   const [expandedSlot, setExpandedSlot] = useState<SlotId | null>(null);
   const [varMode, setVarMode] = useState(false);
@@ -123,6 +130,10 @@ export default function ArbitragePage() {
   const [rendererSample, setRendererSample] = useState<RendererSample | null>(null);
   const [recorderSample, setRecorderSample] = useState<Map<number, RecorderSample>>(new Map());
   const [showDiag, setShowDiag] = useState(false);
+  // Banc d'essai : vidéos ouvertes depuis des fichiers (pas d'horloge commune → synchro cherchée plus loin)
+  const [batchState, setBatchState] = useState<'closed' | 'shown' | 'hidden'>('closed');
+  const captureFromFilesRef = useRef(false);
+  const openFilesInputRef = useRef<HTMLInputElement>(null);
   const varPressedAt = useRef(0);
 
   // VAR history: store last N captures
@@ -471,6 +482,7 @@ export default function ArbitragePage() {
 
     probeDurations(urls);
     autoAnalysisArmed.current = true;
+    captureFromFilesRef.current = false;
 
     setVarOffsets(offsets);
     setVarDurationMs(maxDurationMs);
@@ -563,6 +575,7 @@ export default function ArbitragePage() {
 
     probeDurations(capture.blobs);
     autoAnalysisArmed.current = true;
+    captureFromFilesRef.current = capture.id.startsWith('files-');
 
     setFps(capture.fps);
     setVarOffsets(capture.offsets);
@@ -578,6 +591,22 @@ export default function ArbitragePage() {
     setCurrentFrame(0);
     setTotalFrames(Math.round((capture.durationMs / 1000) * capture.fps));
   }, [slots, stopBufferRecording, recording, probeDurations]);
+
+  // Banc d'essai : 1 à 4 vidéos (les angles d'une même action) ouvertes comme une capture VAR
+  const openVideoFiles = useCallback((files: File[]) => {
+    const picked = files.slice(0, varSlots.length);
+    if (picked.length === 0) return;
+    const blobs = new Map<SlotId, string>();
+    picked.forEach((f, i) => blobs.set(varSlots[i].slotId, URL.createObjectURL(f)));
+    diagLog('open-files', { files: picked.map((f, i) => ({ slot: varSlots[i].slotId, name: f.name, sizeMB: Math.round(f.size / 104857.6) / 10, type: f.type })) });
+    warmUpVision();
+    setBatchState((s) => (s === 'shown' ? 'hidden' : s));
+    const open = () => replayHistoryCapture({ id: `files-${Date.now()}`, timestamp: Date.now(), durationMs: 0, blobs, offsets: new Map(), fps: FPS_DEFAULT });
+    if (!varMode) { open(); return; }
+    // Déjà en VAR : on sort d'abord, pour que les lecteurs soient recréés avec les nouvelles vidéos
+    exitVarMode();
+    setTimeout(open, 50);
+  }, [varSlots, varMode, exitVarMode, replayHistoryCapture]);
 
   // Pause/resume buffer recording (between fights)
   const toggleBufferPause = useCallback(() => {
@@ -712,7 +741,8 @@ export default function ArbitragePage() {
         for (const [slotId, sig] of signals) {
           if (slotId === masterSlotId) continue;
           const currentOffset = varOffsets.get(slotId) || 0;
-          const residual = estimateOffsetSec(masterAdj, toTimeline(sig, currentOffset));
+          // Fichiers ouverts à la main : les vidéos n'ont pas démarré ensemble, décalage cherché sur ±30 s
+          const residual = estimateOffsetSec(masterAdj, toTimeline(sig, currentOffset), captureFromFilesRef.current ? { maxLagSec: 30 } : {});
           const uncertainty = Math.max(0.04, masterStep, medianStep(sig.times));
           if (residual !== null && Math.abs(residual) > uncertainty) {
             newOffsets.set(slotId, currentOffset + residual);
@@ -757,7 +787,7 @@ export default function ArbitragePage() {
       const holeTxt = (() => {
         if (!worstHole) return '';
         const h = worstHole as { slotId: SlotId; at: number; dur: number };
-        const name = slots.find((x) => x.slotId === h.slotId)?.name ?? `caméra ${h.slotId}`;
+        const name = varSlots.find((x) => x.slotId === h.slotId)?.name ?? `caméra ${h.slotId}`;
         return ` · ⚠ ${name} gelée ${h.dur.toFixed(1).replace('.', ',')} s à ${formatTime(Math.max(0, h.at - (offsetsAfter.get(h.slotId) || 0)))}`;
       })();
       const syncTxt = synced > 0 ? ` · ${synced} caméra${synced > 1 ? 's' : ''} resynchronisée${synced > 1 ? 's' : ''}` : '';
@@ -785,7 +815,7 @@ export default function ArbitragePage() {
         analysisAbortRef.current = null;
       }
     }
-  }, [analysisStatus, varBlobs, varDurationMs, varOffsets, getMasterEntry, frameToMedia, probedDurations, slots]);
+  }, [analysisStatus, varBlobs, varDurationMs, varOffsets, getMasterEntry, frameToMedia, probedDurations, varSlots]);
 
   // Ajustement manuel de synchro : décale une caméra de ±1 frame
   const nudgeCamera = useCallback((slotId: SlotId, deltaFrames: number) => {
@@ -1080,6 +1110,20 @@ export default function ArbitragePage() {
             {'\u2190'} 4 Caméras
           </button>
         )}
+        <input
+          ref={openFilesInputRef}
+          type="file"
+          multiple
+          accept="video/*,.mp4,.mov,.m4v,.webm,.mkv"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const files = [...(e.target.files ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+            e.target.value = '';
+            openVideoFiles(files);
+          }}
+        />
+        <button className="btn" style={{ fontSize: '0.7rem', padding: '4px 10px' }} onClick={() => openFilesInputRef.current?.click()} title="Ouvrir 1 à 4 vidéos (angles d'une même action) dans l'écran VAR, avec l'analyse IA">Ouvrir des vidéos</button>
+        <button className="btn" style={{ fontSize: '0.7rem', padding: '4px 10px' }} onClick={() => setBatchState((s) => (s === 'shown' ? 'hidden' : 'shown'))} title="Banc d'essai : passer l'IA sur tout un lot de vidéos, l'une après l'autre">Analyser un lot</button>
         <button className="btn" style={{ fontSize: '0.7rem', padding: '4px 10px' }} onClick={() => setShowDiag((x) => !x)} title="Mesures réelles du WiFi, des téléphones et du Mac (touche D)">Diagnostic</button>
         <a href="/setup" className="btn" style={{ textDecoration: 'none', fontSize: '0.7rem', padding: '4px 10px' }}>Setup</a>
         <a href="/settings" className="btn" style={{ textDecoration: 'none', fontSize: '0.7rem', padding: '4px 10px' }}>Paramètres</a>
@@ -1141,7 +1185,7 @@ export default function ArbitragePage() {
             }}
             onWheel={expandedSlot ? handleVideoWheel : undefined}
           >
-            {slots.map((slot) => {
+            {varSlots.map((slot) => {
               const blobUrl = varBlobs.get(slot.slotId);
               const isExpanded = expandedSlot === slot.slotId;
               const isHidden = expandedSlot !== null && !isExpanded;
@@ -1300,6 +1344,10 @@ export default function ArbitragePage() {
       )}
 
       {varError && <div className="toast-error">{varError}</div>}
+
+      {batchState !== 'closed' && (
+        <BatchPanel hidden={batchState === 'hidden'} onOpen={openVideoFiles} onClose={() => setBatchState('closed')} />
+      )}
 
       {showDiag && (
         <DiagnosticsPanel

@@ -46,7 +46,7 @@ export function analyzeClip(blobUrl: string, opts: AnalyzeClipOptions): Promise<
   const D = opts.durationSec;
   const tail = opts.priorityTailSec ?? 15;
   // Segments [début, fin] en temps média : la fin d'abord
-  const segments: [number, number][] = D > tail + 5 ? [[D - tail, Infinity], [0, D - tail]] : [[0, Infinity]];
+  const segments: [number, number][] = tail > 0 && D > tail + 5 ? [[D - tail, Infinity], [0, D - tail]] : [[0, Infinity]];
   const started = performance.now();
 
   return new Promise((resolve, reject) => {

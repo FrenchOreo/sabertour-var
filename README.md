@@ -148,6 +148,22 @@ Fabriquer l'application localement : `npm install` puis `npm run build:app:mac` 
   secondes (renégociation automatique) — sans effacer les buffers des autres caméras.
 - Détails et feuille de route : [docs/DETECTION-IA.md](docs/DETECTION-IA.md)
 
+### Tester l'IA avec ses propres vidéos (sans tournoi)
+
+Dans l'écran arbitre, pas besoin de téléphones ni de caméras configurées :
+
+- **Ouvrir des vidéos** : choisir 1 à 4 fichiers (les angles d'une même action, dans
+  l'ordre GAUCHE, DROITE, FOND, JUGE). Ils s'ouvrent dans l'écran VAR exactement comme une
+  capture : analyse IA automatique, ◆ touches et croisements, Vue IA (`V`), image par image.
+  Les vidéos n'ont pas besoin d'avoir démarré en même temps : la synchro est cherchée
+  automatiquement sur ±30 s (et reste ajustable avec −1f / +1f).
+- **Analyser un lot** : choisir autant de vidéos qu'on veut (enregistrements SABER VAR,
+  vidéos de téléphone mp4 / mov / webm). Elles sont analysées l'une après l'autre ; le
+  tableau donne pour chacune la part des images où l'IA voit les tireurs et les lames, les
+  touches et croisements trouvés, la vitesse. Un fichier illisible est signalé sans bloquer
+  le lot. **Ouvrir en VAR** sur une ligne pour vérifier avec la Vue IA. À la fin,
+  **Exporter le journal** : il contient le détail de chaque vidéo (instants, zones).
+
 ### Diagnostic : mesures réelles (touche D)
 
 Le bouton **Diagnostic** (ou `D`) ouvre un panneau de **mesures, pas d'estimations** :
