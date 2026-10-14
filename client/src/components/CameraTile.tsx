@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { SlotState } from 'shared/types';
+import { SlotState, CameraTelemetry } from 'shared/types';
 import { ConnectionStats, getHealth } from '../hooks/useConnectionStats';
 
 interface CameraTileProps {
@@ -8,13 +8,15 @@ interface CameraTileProps {
   selected: boolean;
   onClick: () => void;
   connectionStats?: ConnectionStats;
+  /** mesures réelles envoyées par le téléphone (cadence du capteur…) */
+  phoneStats?: CameraTelemetry;
   /** flux perdu / gelé : overlay + bordure rouge pulsée (reconnexion automatique en cours) */
   frozen?: boolean;
 }
 
 const HEALTH_COLORS = { good: '#22c55e', degraded: '#ff8c00', bad: '#ff3b3b' } as const;
 
-export default function CameraTile({ slot, stream, selected, onClick, connectionStats, frozen }: CameraTileProps) {
+export default function CameraTile({ slot, stream, selected, onClick, connectionStats, phoneStats, frozen }: CameraTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [stats, setStats] = useState<{ w: number; h: number; fps: number } | null>(null);
 
@@ -85,13 +87,14 @@ export default function CameraTile({ slot, stream, selected, onClick, connection
         }}>
           <span style={{
             display: 'inline-block', width: 7, height: 7, borderRadius: '50%',
-            background: HEALTH_COLORS[getHealth(connectionStats)],
+            background: HEALTH_COLORS[getHealth(connectionStats, phoneStats)],
           }} />
           {connectionStats.width > 0 && `${connectionStats.width}x${connectionStats.height} `}
           {connectionStats.fps > 0 && `${connectionStats.fps}fps `}
+          {phoneStats?.maxFps && phoneStats.maxFps < phoneStats.requestedFps - 5 ? `(capteur max ${phoneStats.maxFps}) ` : ''}
           {connectionStats.bitrateKbps > 0 && `${(connectionStats.bitrateKbps / 1000).toFixed(1)}Mb/s`}
           {connectionStats.lossPct > 0.5 && (
-            <span style={{ color: HEALTH_COLORS[getHealth(connectionStats)] }}>
+            <span style={{ color: HEALTH_COLORS[getHealth(connectionStats, phoneStats)] }}>
               {connectionStats.lossPct.toFixed(1)}% perte
             </span>
           )}

@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, shell, net, Menu } = require('electron');
 const { startServer } = require('./server');
+const diagnostics = require('./diagnostics');
 const path = require('path');
 const fs = require('fs');
 
@@ -120,6 +121,10 @@ function buildMenu() {
       label: 'Aide',
       submenu: [
         { label: 'Guide bénévoles', click: () => openPage('guide') },
+        { type: 'separator' },
+        { label: 'Exporter le diagnostic…', click: () => diagnostics.exportLog(mainWindow || undefined) },
+        { label: 'Ouvrir le dossier des diagnostics', click: () => diagnostics.openFolder() },
+        { type: 'separator' },
         ...(isMac ? [] : [updateItem]),
         { role: 'toggleDevTools', label: 'Outils de développement' },
       ],
@@ -127,6 +132,12 @@ function buildMenu() {
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
+
+// ── Diagnostic réel (processeur, mémoire, thermique, WiFi) + journal ──
+ipcMain.handle('diag-metrics', () => diagnostics.getMetrics());
+ipcMain.handle('diag-log', (_event, entries) => { diagnostics.appendLog(entries); return true; });
+ipcMain.handle('diag-export', () => diagnostics.exportLog(mainWindow || undefined));
+ipcMain.handle('diag-open-folder', () => diagnostics.openFolder());
 
 // ── IPC Handlers for continuous recording ──
 
@@ -168,6 +179,8 @@ async function createWindow() {
   const persistPath = path.join(app.getPath('userData'), 'slots.json');
   try {
     serverInfo = await startServer({ persistPath });
+    diagnostics.setLanIps(serverInfo.ips);
+    diagnostics.refreshWifi();
   } catch (err) {
     dialog.showErrorBox('Erreur SABER VAR', `Impossible de démarrer le serveur:\n${err.message}`);
     app.quit();
@@ -185,6 +198,9 @@ async function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
+      // Pas de ralentissement quand la fenêtre passe derrière une autre : le buffer, la télémétrie
+      // et l'analyse IA (qui lit les vidéos image par image) doivent continuer à tourner
+      backgroundThrottling: false,
     },
   });
 
@@ -216,6 +232,11 @@ async function createWindow() {
   console.log('╚═══════════════════════════════════════════════════╝');
   console.log('');
 }
+
+// Analyse IA : MediaPipe passe toujours par WebGL pour lire les images. Sans carte graphique
+// utilisable (pilote bloqué, machine virtuelle), Chromium bascule alors sur son rendu logiciel
+// au lieu de rendre l'analyse impossible ; sans effet quand le GPU fonctionne.
+app.commandLine.appendSwitch('enable-unsafe-swiftshader');
 
 app.whenReady().then(createWindow);
 

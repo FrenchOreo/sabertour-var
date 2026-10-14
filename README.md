@@ -109,17 +109,29 @@ Fabriquer l'application localement : `npm install` puis `npm run build:app:mac` 
 | ↑ ↓ | ±10 frames |
 | Espace | Play/Pause |
 | 1/2/3/4 | Vitesse 1x / 0.5x / 0.25x / 0.1x |
-| A | Analyse IA (marqueurs d'impacts + synchro auto) |
+| A | Analyse IA (touches, croisements de lames, synchro auto) |
+| V | Vue IA : squelettes, lames et contacts vus par l'IA |
+| D | Panneau Diagnostic (mesures réelles WiFi / téléphones / Mac) |
 | Maj + ← → | Impact précédent / suivant |
 | Escape | Reprendre le live |
 
 ### Analyse IA et synchro (mode VAR)
 
-- **Analyse IA automatique** : dès l'appui sur VAR, l'app mesure l'intensité du
-  mouvement dans les images et la dessine en **courbe orange** sur la timeline (on voit
-  où l'action se passe), marque les **pics brusques ◆** (touche, parade ou clash — le
-  clic s'aimante dessus) et resynchronise les caméras entre elles. Elle ne juge pas :
+- **Analyse IA automatique** : dès l'appui sur VAR, un modèle de reconnaissance de
+  silhouettes (MediaPipe Pose, embarqué, hors-ligne) repère les **deux tireurs**, l'app
+  retrouve leurs **lames** (lignes lumineuses partant de la main) et marque d'un **◆** chaque
+  **contact lame → corps** (avec la zone : tête, torse, bras, jambe) et chaque **croisement
+  de lames**. Les 15 dernières secondes sont analysées en premier : les marqueurs de
+  l'action litigieuse apparaissent tout de suite. Une touche vue par 2 caméras passe devant.
+  L'intensité du mouvement reste dessinée en **courbe orange** et sert à resynchroniser
+  les caméras. Si le modèle ne voit aucun contact, les ◆ retombent sur les pics de
+  mouvement, et le résumé dit pourquoi (tireurs ou lames peu visibles). L'IA ne juge pas :
   elle pointe les moments à regarder. Touche `A` ou « Relancer l'analyse » pour refaire.
+- **Vue IA** (bouton ou touche `V`) : dessine sur chaque vidéo ce que l'IA a vu à
+  l'image affichée — squelettes, lames, point de contact. Permet de vérifier d'un coup
+  d'œil si elle suit bien les tireurs, sans rien annoter.
+- **Vidéo gelée** : si un flux s'est figé pendant le direct, le résumé l'indique
+  (« ⚠ DROITE gelée 3,8 s à 0:05 ») — il manque des images à cet endroit.
 - La **durée et la cadence de la timeline sont mesurées sur la vidéo réelle** (et plus
   estimées) : la barre et le compteur d'images correspondent exactement au replay, et
   chaque pas ← → cale **toutes** les caméras sur la même image (décalages de synchro
@@ -135,6 +147,37 @@ Fabriquer l'application localement : `npm install` puis `npm run build:app:mac` 
 - **Flux perdu** : une tuile « ⚠ Flux perdu » se reconnecte toute seule en quelques
   secondes (renégociation automatique) — sans effacer les buffers des autres caméras.
 - Détails et feuille de route : [docs/DETECTION-IA.md](docs/DETECTION-IA.md)
+
+### Tester l'IA avec ses propres vidéos (sans tournoi)
+
+Dans l'écran arbitre, pas besoin de téléphones ni de caméras configurées :
+
+- **Ouvrir des vidéos** : choisir 1 à 4 fichiers (les angles d'une même action, dans
+  l'ordre GAUCHE, DROITE, FOND, JUGE). Ils s'ouvrent dans l'écran VAR exactement comme une
+  capture : analyse IA automatique, ◆ touches et croisements, Vue IA (`V`), image par image.
+  Les vidéos n'ont pas besoin d'avoir démarré en même temps : la synchro est cherchée
+  automatiquement sur ±30 s (et reste ajustable avec −1f / +1f).
+- **Analyser un lot** : choisir autant de vidéos qu'on veut (enregistrements SABER VAR,
+  vidéos de téléphone mp4 / mov / webm). Elles sont analysées l'une après l'autre ; le
+  tableau donne pour chacune la part des images où l'IA voit les tireurs et les lames, les
+  touches et croisements trouvés, la vitesse. Un fichier illisible est signalé sans bloquer
+  le lot. **Ouvrir en VAR** sur une ligne pour vérifier avec la Vue IA. À la fin,
+  **Exporter le journal** : il contient le détail de chaque vidéo (instants, zones).
+
+### Diagnostic : mesures réelles (touche D)
+
+Le bouton **Diagnostic** (ou `D`) ouvre un panneau de **mesures, pas d'estimations** :
+
+- **Téléphones** : cadence réelle du capteur et son maximum (un téléphone limité à
+  30 images/s est signalé comme tel, et n'est plus compté « réseau critique » quand on
+  règle 60), débit envoyé, bridage par le WiFi ou le processeur du téléphone, pertes et
+  aller-retour mesurés.
+- **Mac** : processeur (système et SABER VAR), mémoire, température, batterie, WiFi
+  (bande, signal, bruit, débit radio) ou câble, images reçues / décodées / jetées par
+  caméra, blocages de l'interface, rythme d'enregistrement du buffer.
+- **Journal** : tout est enregistré en continu (une ligne toutes les 5 s + chaque VAR et
+  chaque analyse, avec ce que l'IA a vu). Menu **Aide → Exporter le diagnostic…** pour
+  l'envoyer, ou **Aide → Ouvrir le dossier des diagnostics**.
 
 ### Qualité vidéo instable ? Commencer par le matériel
 
@@ -166,7 +209,10 @@ client/src/pages/        — SetupPage, CameraPage, ArbitragePage
 client/src/components/   — CameraTile, VarTimeline, FrameCounter
 client/src/hooks/        — useSignaling, useWebRTC, useVideoBuffer, useFramePlayer,
                            useConnectionStats (santé réseau + latence par caméra)
-client/src/lib/varAnalysis.ts — analyse IA : impacts + synchro auto (corrélation croisée)
+client/src/lib/varAnalysis.ts — signal de mouvement, pics, synchro auto (corrélation croisée)
+client/src/lib/vision/   — IA : silhouettes (MediaPipe Pose, worker), lames, contacts, fusion caméras
+client/src/lib/diagnostics.ts, diagnosis.ts — journal, mesures et causes affichées
+electron/diagnostics.js  — mesures système réelles (CPU, mémoire, WiFi, température) + journal JSONL
 ```
 
 Le système fonctionne entièrement en réseau local. Les flux vidéo passent en WebRTC peer-to-peer entre les téléphones et l'ordinateur arbitre. Le serveur ne fait que relayer les messages de signalisation.

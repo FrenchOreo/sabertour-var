@@ -15,6 +15,8 @@ export interface SlotReadinessInput {
   health?: ConnectionHealth;
   /** flux perdu / gelé détecté par l'auto-réparation */
   frozen?: boolean;
+  /** cause mesurée du problème réseau (ex. « pertes réseau 7 % »), affichée à la place d'un libellé générique */
+  cause?: string;
   /** la caméra a déjà été vue connectée pendant cette session (une position jamais équipée n'est pas une panne) */
   everConnected?: boolean;
   /** durée de replay disponible dans le buffer (ms) */
@@ -78,8 +80,8 @@ export function computeReadiness(slots: SlotReadinessInput[], opts: ReadinessOpt
   for (const s of connected) {
     // Le cas dangereux : l'opérateur croit que ça filme, et ça ne filme plus
     if (s.frozen) blocked.push(`Caméra ${s.name} : flux perdu`);
-    else if (s.health === 'bad') blocked.push(`Caméra ${s.name} : réseau critique`);
-    else if (s.health === 'degraded') warnings.push(`Caméra ${s.name} dégradée`);
+    else if (s.health === 'bad') blocked.push(`Caméra ${s.name} : ${s.cause ?? 'réseau critique'}`);
+    else if (s.health === 'degraded') warnings.push(s.cause ? `Caméra ${s.name} : ${s.cause}` : `Caméra ${s.name} dégradée`);
   }
 
   const minReplay = Math.min(MIN_REPLAY_MS, opts.bufferTargetMs);

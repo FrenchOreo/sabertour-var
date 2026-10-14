@@ -88,7 +88,7 @@ export function probeBlobFrameRate(blobUrl: string, opts: { maxFrames?: number; 
     el.muted = true;
     el.playsInline = true;
     // Doit rester composité pour que requestVideoFrameCallback tire
-    Object.assign(el.style, { position: 'fixed', bottom: '0', right: '0', width: '2px', height: '2px', opacity: '0.01', pointerEvents: 'none', zIndex: '-1' });
+    Object.assign(el.style, { position: 'fixed', bottom: '0', right: '0', width: '2px', height: '2px', opacity: '0.01', pointerEvents: 'none', zIndex: '2147483647' });
     document.body.appendChild(el);
     const mediaTimes: number[] = [];
     let done = false;
